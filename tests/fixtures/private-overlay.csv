@@ -1,0 +1,3 @@
+name,type,city,state,country,lat,lon,website,fips
+=Private Formula Test Library,library,Testville,NY,US,42.5000,-75.5000,javascript:alert(1),36001
+Private Consent Test Archive,archive,Testville,NY,US,42.5100,-75.5100,https://example.org,36001

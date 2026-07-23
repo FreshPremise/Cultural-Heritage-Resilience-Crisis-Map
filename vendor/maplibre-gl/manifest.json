@@ -1,0 +1,9 @@
+{
+  "name": "maplibre-gl",
+  "version": "4.7.1",
+  "source": "https://github.com/maplibre/maplibre-gl-js/releases/tag/v4.7.1",
+  "files": {
+    "vendor/maplibre-gl/maplibre-gl.js": "be9633c4d870e26fb37f1cfe5c5a77181667114003ea16207ac7850d8da8add1",
+    "vendor/maplibre-gl/maplibre-gl.css": "576b085fdd9487a65a19215328c1e086c07ce5bf6da09b666b3806d3d008dae9"
+  }
+}

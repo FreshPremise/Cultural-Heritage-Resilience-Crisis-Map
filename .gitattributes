@@ -1,0 +1,7 @@
+# Normalize line endings on commit; keep working copies native.
+* text=auto
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.json text eol=lf

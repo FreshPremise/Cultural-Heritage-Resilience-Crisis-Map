@@ -1,0 +1,39 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+.claude/
+
+# Node (in case tooling is added later)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# One-time build artifact (regenerate with scripts/geocode_fips.mjs)
+fips_map.json
+
+# Local env / secrets — never commit API keys
+.env
+.env.*
+*.local
+*.pem
+*.key
+*.p12
+serviceAccount*.json
+
+# Logs and temp
+*.log
+__pycache__/
+*.py[cod]
+tmp/
+outputs/
+
+# Internal project handoffs and local tooling (not for public sharing)
+HANDOFF.md
+CONTINUING-WITH-CODEX.md
+NEXT-CHAT-HANDOFF.md
+WEBSITE-ENRICHMENT-HANDOFF.md
+.claude/settings.local.json
