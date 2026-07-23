@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const vm = require("node:vm");
 
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
@@ -81,6 +82,85 @@ test("map hazard markers and legend use the right-panel hazard groups", () => {
   assert.match(app, /legendHazardGroups\(\)\.map/);
   assert.match(app, /svg\(meta\.icon\).*esc\(meta\.label\)/s);
   assert.doesNotMatch(app, /label: "Tropical"/);
+});
+
+test("every hazard group is enabled in the default map state", () => {
+  const groupsBlock = app.match(/var LAYER_GROUPS = \{([\s\S]*?)\n  \};/)?.[1] || "";
+  const defaultsBlock = app.match(/layerOn: \{([^}]+)\}/)?.[1] || "";
+  const groups = [...groupsBlock.matchAll(/^\s{4}(\w+):/gm)].map((match) => match[1]).sort();
+  const defaults = [...defaultsBlock.matchAll(/(\w+):\s*true/g)].map((match) => match[1]).sort();
+  assert.deepEqual(defaults, groups);
+});
+
+test("CWFIS wildfire perimeters and markers stay visible independently of the quiet-area switch", () => {
+  const cwfisSource = app.match(/function isCwfisWildfire\(e\) \{[\s\S]*?\n  \}/)?.[0];
+  const areaSource = app.match(/function shouldRenderHazardArea\(e, hasOrgs\) \{[\s\S]*?\n  \}/)?.[0];
+  const markerSource = app.match(/function shouldRenderHazardMarker\(e, hasOrgs\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(cwfisSource && areaSource && markerSource, "CWFIS visibility helpers are missing");
+
+  function visibility(showQuiet, event, hasOrgs) {
+    const context = { state: { showQuiet }, event, hasOrgs, area: null, marker: null };
+    vm.runInNewContext(
+      `${cwfisSource}; ${areaSource}; ${markerSource};` +
+      "area = shouldRenderHazardArea(event, hasOrgs);" +
+      "marker = shouldRenderHazardMarker(event, hasOrgs);",
+      context
+    );
+    return { area: context.area, marker: context.marker };
+  }
+
+  const cwfisPerimeter = { feed: "cwfis", category: "fire", geometry: { type: "Polygon" } };
+  const weatherPolygon = { feed: "eccc", category: "storm", geometry: { type: "Polygon" } };
+  assert.deepEqual(visibility(false, cwfisPerimeter, 0), { area: true, marker: true });
+  assert.deepEqual(visibility(true, cwfisPerimeter, 0), { area: true, marker: true });
+  assert.deepEqual(visibility(false, weatherPolygon, 0), { area: false, marker: false });
+  assert.deepEqual(visibility(true, weatherPolygon, 0), { area: true, marker: false });
+  assert.deepEqual(visibility(false, weatherPolygon, 1), { area: true, marker: true });
+  assert.deepEqual(
+    visibility(false, { feed: "fires", category: "fire", geometry: null }, 0),
+    { area: false, marker: true }
+  );
+  assert.match(app, /e\.affected\.length \|\| isCwfisWildfire\(e\)/);
+  assert.match(app, /\["get", "cwfis"\][^\n]*0\.13/);
+  assert.match(app, /\["get", "cwfis"\][^\n]*0\.65/);
+});
+
+test("nearby hazards receive separate fixed-pixel coordinates", () => {
+  const offsetsSource = app.match(/var HAZARD_MARKER_OFFSETS = \[[\s\S]*?\n  \];/)?.[0];
+  const radiusSource = app.match(/var HAZARD_MARKER_GROUP_RADIUS = \d+;/)?.[0];
+  const projectSource = app.match(/function hazardMarkerWorldPixel\(coordinates, zoom\) \{[\s\S]*?\n  \}/)?.[0];
+  const unprojectSource = app.match(/function hazardMarkerCoordinatesFromPixel\(point, zoom\) \{[\s\S]*?\n  \}/)?.[0];
+  const spreadSource = app.match(/function spreadNearbyHazardMarkers\(features, zoom\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(offsetsSource && radiusSource && projectSource && unprojectSource && spreadSource, "nearby-marker spreading logic is missing");
+
+  const zoom = 6;
+  const anchor = [-119.49, 49.88];
+  const setupContext = {};
+  vm.runInNewContext(`${projectSource}; ${unprojectSource};`, setupContext);
+  const anchorPixel = setupContext.hazardMarkerWorldPixel(anchor, zoom);
+  const nearbyAnchor = setupContext.hazardMarkerCoordinatesFromPixel(
+    [anchorPixel[0] + 10, anchorPixel[1] + 6],
+    zoom
+  );
+  const features = [
+    { properties: { id: "heat" }, geometry: { coordinates: anchor } },
+    { properties: { id: "air" }, geometry: { coordinates: nearbyAnchor } },
+    { properties: { id: "fire" }, geometry: { coordinates: [-120.2, 50.1] } },
+  ];
+  const context = { features: structuredClone(features), result: null };
+  vm.runInNewContext(
+    `${offsetsSource}; ${radiusSource}; ${projectSource}; ${unprojectSource}; ${spreadSource};` +
+      `result = spreadNearbyHazardMarkers(features, ${zoom});`,
+    context
+  );
+  assert.deepEqual(
+    context.result.map((feature) => feature.properties.offsetSlot),
+    [1, 2, 0]
+  );
+  const heatPixel = context.hazardMarkerWorldPixel(context.result[0].geometry.coordinates, zoom);
+  const airPixel = context.hazardMarkerWorldPixel(context.result[1].geometry.coordinates, zoom);
+  assert.ok(Math.hypot(heatPixel[0] - airPixel[0], heatPixel[1] - airPixel[1]) >= 32);
+  assert.match(app, /map\.on\("zoomend"[\s\S]*?hazardPointGeoJSON\(\)/);
 });
 
 test("private-list assistant sharing is hidden without a list and clearly states its live status", () => {

@@ -288,11 +288,24 @@
     };
   }
 
+  function isCwfisWildfire(e) {
+    return e.feed === "cwfis" && e.category === "fire";
+  }
+
+  function shouldRenderHazardArea(e, hasOrgs) {
+    return !!hasOrgs || state.showQuiet || isCwfisWildfire(e);
+  }
+
   function hazardAreaGeoJSON() {
     var feats = [];
     visibleEvents().forEach(function (e) {
-      var props = { sev: e.severity, id: e.id, hasOrgs: e.affected.length ? 1 : 0 };
-      if (!props.hasOrgs && !state.showQuiet) return;
+      var props = {
+        sev: e.severity,
+        id: e.id,
+        hasOrgs: e.affected.length ? 1 : 0,
+        cwfis: isCwfisWildfire(e) ? 1 : 0,
+      };
+      if (!shouldRenderHazardArea(e, props.hasOrgs)) return;
       if (e.geometry) {
         feats.push({ type: "Feature", properties: props, geometry: e.geometry });
       } else if (e.point && e.radiusKm) {
@@ -325,15 +338,100 @@
     return null;
   }
 
+  function shouldRenderHazardMarker(e, hasOrgs) {
+    if (!e.geometry || hasOrgs) return true;
+    // CWFIS publishes Canadian fires as perimeter polygons rather than incident points.
+    // Keep their clickable flame markers visible whenever the Wildfire layer is enabled;
+    // the secondary quiet-area switch controls other remote polygon alerts only.
+    return isCwfisWildfire(e);
+  }
+
+  // A lone event stays at its true anchor. Events close enough for their rendered discs
+  // to overlap fan out in screen pixels so colours and symbols cannot merge into a
+  // misleading hybrid marker.
+  var HAZARD_MARKER_OFFSETS = [
+    [0, 0],
+    [0, -24], [24, 0], [0, 24], [-24, 0],
+    [17, -17], [17, 17], [-17, 17], [-17, -17],
+    [0, -40], [40, 0], [0, 40], [-40, 0],
+  ];
+  var HAZARD_MARKER_GROUP_RADIUS = 32;
+
+  function hazardMarkerWorldPixel(coordinates, zoom) {
+    var worldSize = 512 * Math.pow(2, zoom);
+    var sinLat = Math.sin(coordinates[1] * Math.PI / 180);
+    sinLat = Math.max(-0.9999, Math.min(0.9999, sinLat));
+    return [
+      (coordinates[0] + 180) / 360 * worldSize,
+      (0.5 - Math.log((1 + sinLat) / (1 - sinLat)) / (4 * Math.PI)) * worldSize,
+    ];
+  }
+
+  function hazardMarkerCoordinatesFromPixel(point, zoom) {
+    var worldSize = 512 * Math.pow(2, zoom);
+    var lon = point[0] / worldSize * 360 - 180;
+    var mercatorY = Math.PI - 2 * Math.PI * point[1] / worldSize;
+    var lat = 180 / Math.PI * Math.atan(Math.sinh(mercatorY));
+    return [lon, lat];
+  }
+
+  function spreadNearbyHazardMarkers(features, zoom) {
+    var groups = [];
+    var cells = {};
+    features.forEach(function (feature) {
+      var pixel = hazardMarkerWorldPixel(feature.geometry.coordinates, zoom);
+      var cellX = Math.floor(pixel[0] / HAZARD_MARKER_GROUP_RADIUS);
+      var cellY = Math.floor(pixel[1] / HAZARD_MARKER_GROUP_RADIUS);
+      var candidates = {};
+      for (var dx = -1; dx <= 1; dx++) {
+        for (var dy = -1; dy <= 1; dy++) {
+          var nearby = cells[(cellX + dx) + "," + (cellY + dy)] || [];
+          nearby.forEach(function (groupIndex) { candidates[groupIndex] = true; });
+        }
+      }
+      var chosen = -1;
+      Object.keys(candidates).some(function (groupIndex) {
+        var group = groups[Number(groupIndex)];
+        var touches = group.pixels.some(function (other) {
+          var xGap = pixel[0] - other[0];
+          var yGap = pixel[1] - other[1];
+          return xGap * xGap + yGap * yGap <= HAZARD_MARKER_GROUP_RADIUS * HAZARD_MARKER_GROUP_RADIUS;
+        });
+        if (touches) chosen = Number(groupIndex);
+        return touches;
+      });
+      if (chosen < 0) {
+        chosen = groups.length;
+        groups.push({ features: [], pixels: [] });
+      }
+      feature.properties.offsetSlot = 0;
+      groups[chosen].features.push(feature);
+      groups[chosen].pixels.push(pixel);
+      var ownCell = cellX + "," + cellY;
+      if (!cells[ownCell]) cells[ownCell] = [];
+      if (cells[ownCell].indexOf(chosen) === -1) cells[ownCell].push(chosen);
+    });
+    groups.forEach(function (group) {
+      if (group.features.length < 2) return;
+      group.features.forEach(function (feature, index) {
+        var slot = 1 + (index % (HAZARD_MARKER_OFFSETS.length - 1));
+        var offset = HAZARD_MARKER_OFFSETS[slot];
+        var pixel = hazardMarkerWorldPixel(feature.geometry.coordinates, zoom);
+        feature.properties.offsetSlot = slot;
+        feature.geometry.coordinates = hazardMarkerCoordinatesFromPixel(
+          [pixel[0] + offset[0], pixel[1] + offset[1]],
+          zoom
+        );
+      });
+    });
+    return features;
+  }
+
   function hazardPointGeoJSON() {
     var feats = [];
     visibleEvents().forEach(function (e) {
       var hasOrgs = e.affected.length ? 1 : 0;
-      // A drawn polygon already shows where the hazard is, so only pin a marker on top of
-      // one when it actually touches organizations. Without this, the couple of hundred
-      // remote wilderness fire perimeters Canada publishes each cover the map in markers
-      // that open an event with nothing in it.
-      if (e.geometry && !hasOrgs) return;
+      if (!shouldRenderHazardMarker(e, hasOrgs)) return;
       var p = markerPoint(e);
       if (!p) return;
       var group = hazardGroupId(e.category);
@@ -350,7 +448,8 @@
         geometry: { type: "Point", coordinates: p },
       });
     });
-    return { type: "FeatureCollection", features: feats };
+    var zoom = map && typeof map.getZoom === "function" ? map.getZoom() : 3.1;
+    return { type: "FeatureCollection", features: spreadNearbyHazardMarkers(feats, zoom) };
   }
 
   /* ---------------- live weather radar overlay ---------------- */
@@ -481,7 +580,9 @@
         "icon-allow-overlap": true,
         "icon-ignore-placement": true,
       },
-      paint: { "icon-opacity": 1 },
+      paint: {
+        "icon-opacity": 1,
+      },
     });
   }
 
@@ -553,6 +654,7 @@
         "fill-color": ["match", ["get", "sev"], 4, SEV_FILL[4], 3, SEV_FILL[3], 2, SEV_FILL[2], SEV_FILL[1]],
         "fill-opacity": ["case", ["==", ["get", "hasOrgs"], 1],
           ["match", ["get", "sev"], 4, 0.28, 3, 0.21, 0.14],
+          ["==", ["get", "cwfis"], 1], 0.13,
           0.035],
       },
     });
@@ -560,14 +662,21 @@
       id: "hazard-line", type: "line", source: "hazard-areas",
       paint: {
         "line-color": ["match", ["get", "sev"], 4, SEV_FILL[4], 3, SEV_FILL[3], 2, SEV_FILL[2], SEV_FILL[1]],
-        "line-width": ["case", ["==", ["get", "hasOrgs"], 1], 1, 0.5],
-        "line-opacity": ["case", ["==", ["get", "hasOrgs"], 1], 0.5, 0.15],
+        "line-width": ["case",
+          ["==", ["get", "hasOrgs"], 1], 1,
+          ["==", ["get", "cwfis"], 1], 1.2,
+          0.5],
+        "line-opacity": ["case",
+          ["==", ["get", "hasOrgs"], 1], 0.5,
+          ["==", ["get", "cwfis"], 1], 0.65,
+          0.15],
       },
     });
 
     // The disc and white icon use the same visible group as the right-hand controls and
     // legend; severity is carried by marker size.
     map.addSource("hazard-points", { type: "geojson", data: hazardPointGeoJSON() });
+    var hazardPointLayers = ["hazard-point"];
     map.addLayer({
       id: "hazard-point", type: "circle", source: "hazard-points",
       paint: {
@@ -633,7 +742,7 @@
     // Organization points are drawn above alerts. When both occupy the clicked pixels,
     // preserve that visual priority instead of letting the alert handler replace the
     // organization popup a moment later.
-    ["hazard-point", "hazard-icon"].forEach(function (layer) {
+    hazardPointLayers.forEach(function (layer) {
       map.on("click", layer, function (e) {
         if (showOrganizationAtPoint(e.point)) return;
         var id = e.features[0].properties.id;
@@ -641,7 +750,7 @@
         selectEvent(id, { frame: false });
       });
     });
-    ["org-point", "org-selected-star", "hazard-point", "hazard-icon"].forEach(function (l) {
+    ["org-point", "org-selected-star"].concat(hazardPointLayers).forEach(function (l) {
       map.on("mouseenter", l, function () { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", l, function () { map.getCanvas().style.cursor = ""; });
     });
@@ -1222,7 +1331,7 @@
   function countQuietAreas() {
     var cats = activeCats(), n = 0;
     state.events.forEach(function (e) {
-      if (!cats[e.category] || e.affected.length) return;
+      if (!cats[e.category] || e.affected.length || isCwfisWildfire(e)) return;
       if (e.geometry || (e.point && e.radiusKm)) n++;
     });
     return n;
@@ -1965,6 +2074,13 @@
       addDataLayers();
       refreshMapData();
       refreshRadar();
+    });
+    // Coordinate spreading is recalculated at the new scale so coincident markers keep
+    // a stable screen-pixel gap instead of drifting together or far apart while zooming.
+    map.on("zoomend", function () {
+      if (map.getSource("hazard-points")) {
+        map.getSource("hazard-points").setData(hazardPointGeoJSON());
+      }
     });
     // The basemap is a CDN dependency; the event panel must not depend on it.
     // Swallow style/tile errors so a basemap outage degrades to a blank map, not a blank app.
