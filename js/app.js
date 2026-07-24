@@ -141,6 +141,68 @@
   function catMeta(c) { return CAT_META[c] || CAT_META.other; }
   function el(id) { return document.getElementById(id); }
 
+  /* ---------------- release updates ---------------- */
+
+  var APP_BUILD = "2026.07.24.1";
+  var VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+  var latestAvailableBuild = "";
+  var versionCheckPending = false;
+
+  function validBuild(value) {
+    return typeof value === "string" && /^\d{4}\.\d{2}\.\d{2}\.\d+$/.test(value);
+  }
+
+  function compareBuilds(a, b) {
+    if (!validBuild(a) || !validBuild(b)) return 0;
+    var left = a.split(".").map(Number);
+    var right = b.split(".").map(Number);
+    for (var i = 0; i < left.length; i++) {
+      if (left[i] !== right[i]) return left[i] > right[i] ? 1 : -1;
+    }
+    return 0;
+  }
+
+  function showUpdateNotice(build) {
+    if (compareBuilds(build, APP_BUILD) <= 0) return;
+    latestAvailableBuild = build;
+    var notice = el("update-notice");
+    if (notice) notice.hidden = false;
+  }
+
+  function checkForAppUpdate() {
+    if (versionCheckPending || !window.fetch) return Promise.resolve(false);
+    versionCheckPending = true;
+    var versionUrl = new URL("/version.json", window.location.origin);
+    versionUrl.searchParams.set("check", String(Date.now()));
+    return fetch(versionUrl.href, {
+      cache: "no-store",
+      credentials: "same-origin",
+      redirect: "error",
+      headers: { Accept: "application/json" },
+    }).then(function (response) {
+      if (!response.ok) throw new Error("Version check failed");
+      return response.text();
+    }).then(function (text) {
+      if (text.length > 1024) throw new Error("Version response too large");
+      var payload = JSON.parse(text);
+      if (!payload || !validBuild(payload.build)) throw new Error("Invalid version response");
+      showUpdateNotice(payload.build);
+      return compareBuilds(payload.build, APP_BUILD) > 0;
+    }).catch(function () {
+      // Version discovery must never interfere with the live map or its data feeds.
+      return false;
+    }).finally(function () {
+      versionCheckPending = false;
+    });
+  }
+
+  function reloadForUpdate() {
+    var url = new URL(window.location.href);
+    url.searchParams.set("build", latestAvailableBuild || APP_BUILD);
+    url.searchParams.set("refresh", String(Date.now()));
+    window.location.replace(url.href);
+  }
+
   /* ---------------- geometry: point in hazard footprint ---------------- */
 
   function pointInRing(lon, lat, ring) {
@@ -2046,6 +2108,13 @@
     buildFilters();
     renderAboutHazardIcons();
     setupSearch();
+    el("update-reload").addEventListener("click", reloadForUpdate);
+    checkForAppUpdate();
+    window.addEventListener("pageshow", checkForAppUpdate);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") checkForAppUpdate();
+    });
+    setInterval(checkForAppUpdate, VERSION_CHECK_INTERVAL_MS);
 
     map = new maplibregl.Map({
       container: "map",

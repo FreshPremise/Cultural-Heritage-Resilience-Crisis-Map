@@ -11,6 +11,7 @@ const chat = fs.readFileSync(path.join(root, "js", "chat.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const privacy = fs.readFileSync(path.join(root, "privacy.html"), "utf8");
+const version = JSON.parse(fs.readFileSync(path.join(root, "version.json"), "utf8"));
 
 test("README shows the repository-owned application screenshot before What it does", () => {
   const imageRef = "docs/images/cultural-heritage-resilience-map.png";
@@ -33,6 +34,43 @@ test("runtime scripts and styles are local and consistently cache-versioned", ()
     assert.ok(!/^https?:/i.test(ref), ref);
     assert.ok(fs.existsSync(path.join(root, ref.split("?")[0])), ref);
   }
+});
+
+test("release metadata, update discovery, and cache-busting reload stay synchronized", () => {
+  const assetVersions = [...html.matchAll(/(?:src|href)="[^"]+\.(?:js|css)\?v=(\d+)"/g)].map((m) => Number(m[1]));
+  const appBuild = app.match(/var APP_BUILD = "([^"]+)"/)?.[1];
+  const metaBuild = html.match(/<meta name="application-version" content="([^"]+)">/)?.[1];
+  assert.equal(appBuild, version.build);
+  assert.equal(metaBuild, version.build);
+  assert.ok(assetVersions.length >= 8);
+  assert.ok(assetVersions.every((value) => value === version.assetVersion));
+  assert.match(html, /id="update-notice"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
+  assert.match(html, /Build 2026\.07\.24\.1 · Released July 24, 2026/);
+  assert.match(app, /new URL\("\/version\.json", window\.location\.origin\)/);
+  assert.match(app, /cache: "no-store"/);
+  assert.match(app, /credentials: "same-origin"/);
+  assert.match(app, /redirect: "error"/);
+  assert.match(app, /text\.length > 1024/);
+  assert.match(app, /url\.searchParams\.set\("build", latestAvailableBuild \|\| APP_BUILD\)/);
+  assert.match(app, /window\.location\.replace\(url\.href\)/);
+  assert.match(app, /window\.addEventListener\("pageshow", checkForAppUpdate\)/);
+  assert.match(app, /document\.visibilityState === "visible"/);
+});
+
+test("build comparison only accepts and orders the fixed numeric release format", () => {
+  const validSource = app.match(/function validBuild\(value\) \{[\s\S]*?\n  \}/)?.[0];
+  const compareSource = app.match(/function compareBuilds\(a, b\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(validSource && compareSource, "build validation helpers are missing");
+  const context = { result: null };
+  vm.runInNewContext(
+    `${validSource}; ${compareSource}; result = [` +
+      `compareBuilds("2026.07.24.2", "2026.07.24.1"),` +
+      `compareBuilds("2026.07.24.1", "2026.07.24.1"),` +
+      `compareBuilds("2026.07.23.9", "2026.07.24.1"),` +
+      `compareBuilds("not-a-build", "2026.07.24.1")];`,
+    context
+  );
+  assert.deepEqual(Array.from(context.result), [1, 0, -1, 0]);
 });
 
 test("the page declares the core content-security restrictions", () => {

@@ -181,6 +181,40 @@ button { font: inherit; color: inherit; }
 main { display: flex; height: calc(100% - 56px); position: relative; }
 #map { flex: 1; position: relative; min-width: 0; background: var(--bg); }
 
+.update-notice {
+  position: fixed;
+  z-index: 70;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  padding: 9px 10px 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--link) 38%, var(--line));
+  border-radius: 9px;
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.update-notice[hidden] { display: none; }
+.update-notice button {
+  flex: none;
+  border: 1px solid var(--link);
+  border-radius: 6px;
+  padding: 5px 9px;
+  background: var(--link);
+  color: #ffffff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.update-notice button:hover { filter: brightness(0.92); }
+
 /* ---------- assistant panel ---------- */
 #assistant {
   width: 360px; flex: none;
@@ -801,6 +835,12 @@ dialog#about::backdrop, dialog#select-overlay::backdrop, dialog#outreach::backdr
 #about .about-feeds a,
 #about .about-note a { text-decoration: underline; text-underline-offset: 2px; }
 .about-note { font-size: 11.5px !important; color: var(--ink-3) !important; margin-top: 16px; }
+.about-build {
+  margin-top: 5px;
+  color: var(--ink-3) !important;
+  font-size: 11.5px !important;
+  font-variant-numeric: tabular-nums;
+}
 .about-actions { margin-top: 18px; text-align: right; }
 .btn {
   padding: 7px 16px;
@@ -858,6 +898,13 @@ dialog#about::backdrop, dialog#select-overlay::backdrop, dialog#outreach::backdr
   .header-actions { gap: 2px; }
   .icon-btn { width: 30px; }
   .search { min-width: 56px; }
+  .update-notice {
+    align-items: flex-start;
+    gap: 8px;
+    width: calc(100vw - 16px);
+    top: 60px;
+  }
+  .update-notice span { flex: 1; }
 }
 
 @media (max-width: 560px) {

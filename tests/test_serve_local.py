@@ -36,6 +36,22 @@ class RestrictedServerTests(unittest.TestCase):
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
             self.assertEqual(response.headers["Cross-Origin-Opener-Policy"], "same-origin")
             self.assertIn("frame-ancestors 'none'", response.headers["Content-Security-Policy"])
+            self.assertEqual(
+                response.headers["Cache-Control"],
+                "no-store, no-cache, max-age=0, must-revalidate",
+            )
+            self.assertEqual(response.headers["Pragma"], "no-cache")
+            self.assertEqual(response.headers["Expires"], "0")
+
+    def test_version_manifest_is_served_without_caching(self):
+        with self.opener.open(self.base + "/version.json", timeout=3) as response:
+            body = response.read().decode("utf-8")
+            self.assertIn('"build": "2026.07.24.1"', body)
+            self.assertEqual(
+                response.headers["Cache-Control"],
+                "no-store, no-cache, max-age=0, must-revalidate",
+            )
+            self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
     def test_privacy_page_is_a_served_runtime_document(self):
         with self.opener.open(self.base + "/privacy.html", timeout=3) as response:

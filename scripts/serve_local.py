@@ -20,7 +20,7 @@ CSP = (
     "base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 )
 
-EXACT_PATHS = {"/", "/index.html", "/privacy.html", "/styles.css"}
+EXACT_PATHS = {"/", "/index.html", "/privacy.html", "/styles.css", "/version.json"}
 ALLOWED_PREFIXES = ("/data/", "/js/", "/vendor/maplibre-gl/")
 
 
@@ -71,8 +71,13 @@ class RestrictedStaticHandler(SimpleHTTPRequestHandler):
             "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
         )
         self.send_header("Cross-Origin-Opener-Policy", "same-origin")
-        if self._normalized_path() in {"/", "/index.html"}:
-            self.send_header("Cache-Control", "no-cache")
+        if self._normalized_path() in {"/", "/index.html", "/version.json"}:
+            self.send_header(
+                "Cache-Control",
+                "no-store, no-cache, max-age=0, must-revalidate",
+            )
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         super().end_headers()
 
     def do_POST(self) -> None:
