@@ -201,8 +201,9 @@ recovery needs. Possible future development includes:
   endorsements.
 - Creating versions tailored to individual states, provinces, territories, or other
   regions.
-- Allowing associations, consortia, government agencies, and other organizations to
+- Working with associations, consortia, government agencies, and other organizations to
   adapt the application for the institutions and networks they support.
+- Improving space issues in mobile version.
 
 ## Development and attribution
 
