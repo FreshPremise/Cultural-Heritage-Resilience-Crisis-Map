@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="application-version" content="2026.08.06.1">
+<meta name="application-version" content="2026.08.06.2">
 <title>Cultural Heritage Resilience — crisis monitor for cultural heritage</title>
 <meta name="description" content="Live situational awareness for libraries, museums, and archives across North America.">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tiles.openfreemap.org https://tilecache.rainviewer.com https://*.tilecache.rainviewer.com; font-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='4.7' y='4.7' width='6.6' height='6.6' transform='rotate(45 8 8)' fill='%238C2F24'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=26">
-<link rel="stylesheet" href="styles.css?v=26">
+<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=27">
+<link rel="stylesheet" href="styles.css?v=27">
 </head>
 <body>
 <header id="topbar">
@@ -152,7 +152,7 @@
   <div class="about-inner">
     <h2>Cultural Heritage Resilience</h2>
     <p class="about-note">This project may be downloaded from <a href="https://github.com/FreshPremise/Cultural-Heritage-Resilience-Crisis-Map" target="_blank" rel="noopener">GitHub</a>.</p>
-    <p class="about-build">Build 2026.08.06.1 · Released August 6, 2026</p>
+    <p class="about-build">Build 2026.08.06.2 · Released August 6, 2026</p>
     <p class="about-prototype"><b>Prototype:</b> This map shows a non-exhaustive sample of cultural heritage organizations across North America and should not be treated as a complete directory.</p>
     <p class="about-lede">This is an interactive live crisis map for North American cultural heritage organizations showing hazards that threaten libraries, museums, and archives. A representative sample of these organizations is plotted across North America alongside storms, floods, wildfires, earthquakes, heat and cold, and air-quality alerts.</p>
     <h3>How to read the map</h3>
@@ -219,6 +219,7 @@
     <pre class="csv-sample">name,type,city,state,country,lat,lon,website,fips
 Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://example.org,17167</pre>
     <p class="about-note">Files are limited to 5 MB and 10,000 data rows. No coordinates? Geocode your addresses first: Google Sheets add-ons, the free Nominatim service, or the US Census batch geocoder will all turn addresses into lat/lon columns.</p>
+    <p class="about-note">Tip: once your list is active, a "My list only" button appears beside the organization type filters. It hides the public dataset so the map, counts, briefs, and exports show just your organizations.</p>
     <div class="member-controls">
       <label class="btn file-btn"><span id="select-file-label">Choose spreadsheet…</span><input id="select-file" class="file-input" type="file" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" aria-describedby="select-status"></label>
       <button id="select-clear" class="btn" hidden>Remove my list</button>
@@ -240,14 +241,14 @@ Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://exampl
   </div>
 </dialog>
 
-<script src="vendor/maplibre-gl/maplibre-gl.js?v=26"></script>
+<script src="vendor/maplibre-gl/maplibre-gl.js?v=27"></script>
 <!-- Bump ?v= after editing any of these; a plain static server sets no cache headers,
      so browsers happily serve a stale copy until forced otherwise. -->
-<script src="data/organizations.js?v=26"></script>
-<script src="data/libraries-expanded.js?v=26"></script>
-<script src="js/security.js?v=26"></script>
-<script src="js/feeds.js?v=26"></script>
-<script src="js/app.js?v=26"></script>
-<script src="js/chat.js?v=26"></script>
+<script src="data/organizations.js?v=27"></script>
+<script src="data/libraries-expanded.js?v=27"></script>
+<script src="js/security.js?v=27"></script>
+<script src="js/feeds.js?v=27"></script>
+<script src="js/app.js?v=27"></script>
+<script src="js/chat.js?v=27"></script>
 </body>
 </html>

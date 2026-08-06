@@ -477,6 +477,11 @@ main { display: flex; height: calc(100% - 56px); position: relative; }
 .chip[aria-pressed="true"] { background: var(--chip-on); color: var(--ink); }
 .chip .cdot { width: 6px; height: 6px; border-radius: 50%; }
 .chip[aria-pressed="false"] .cdot { opacity: 0.35; }
+/* The "My list only" chip carries the red uploaded-list star instead of a type dot. */
+.chip .cdot.star {
+  width: 10px; height: 10px; border-radius: 0; background: #c7352b;
+  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 94%, 50% 72%, 21% 94%, 32% 57%, 2% 35%, 39% 35%);
+}
 .chip-ic { display: inline-flex; align-items: center; flex: none; }
 .chip-ic svg { width: 12px; height: 12px; }
 .chip[aria-pressed="false"] .chip-ic { opacity: 0.4; }

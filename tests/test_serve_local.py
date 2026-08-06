@@ -46,7 +46,7 @@ class RestrictedServerTests(unittest.TestCase):
     def test_version_manifest_is_served_without_caching(self):
         with self.opener.open(self.base + "/version.json", timeout=3) as response:
             body = response.read().decode("utf-8")
-            self.assertIn('"build": "2026.08.06.1"', body)
+            self.assertIn('"build": "2026.08.06.2"', body)
             self.assertEqual(
                 response.headers["Cache-Control"],
                 "no-store, no-cache, max-age=0, must-revalidate",

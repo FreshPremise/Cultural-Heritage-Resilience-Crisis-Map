@@ -143,7 +143,7 @@
 
   /* ---------------- release updates ---------------- */
 
-  var APP_BUILD = "2026.08.06.1";
+  var APP_BUILD = "2026.08.06.2";
   var VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
   var latestAvailableBuild = "";
   var versionCheckPending = false;
@@ -306,10 +306,13 @@
     // as specks at continental zoom they read as unexplained marks on the map rather than
     // as information. The legend offers a switch to show them.
     showQuiet: false,
+    // When on, every display surface shows only the user's uploaded organizations.
+    onlySelected: false,
   };
   try {
     if (localStorage.getItem("hw-radar") === "0") state.radarOn = false;
     if (localStorage.getItem("hw-quiet") === "1") state.showQuiet = true;
+    if (localStorage.getItem("hw-only-selected") === "1" && ORGS.some(function (o) { return o.selected; })) state.onlySelected = true;
   } catch (e) {}
 
   function activeCats() {
@@ -322,6 +325,20 @@
   function visibleEvents() {
     var cats = activeCats();
     return state.events.filter(function (e) { return cats[e.category]; });
+  }
+
+  // The "My list only" view. Impact matching itself always runs on every organization —
+  // only what is SHOWN narrows, so toggling back is instant and zone fetches stay warm.
+  // Each event carries `affectedShown` (the affected ids the current view displays)
+  // alongside the full `affected` list, refreshed by computeImpact and by the toggle.
+  var ONLY_LS = "hw-only-selected";
+  function orgShown(o) { return !state.onlySelected || !!o.selected; }
+  function refreshShownAffected() {
+    state.events.forEach(function (e) {
+      e.affectedShown = state.onlySelected
+        ? e.affected.filter(function (id) { var o = orgById[id]; return o && o.selected; })
+        : e.affected;
+    });
   }
 
   /* ---------------- map ---------------- */
@@ -339,7 +356,7 @@
   function orgGeoJSON() {
     return {
       type: "FeatureCollection",
-      features: ORGS.filter(function (o) { return state.typeOn[o.type]; }).map(function (o) {
+      features: ORGS.filter(function (o) { return state.typeOn[o.type] && orgShown(o); }).map(function (o) {
         return {
           type: "Feature",
           id: o.id,
@@ -364,7 +381,7 @@
       var props = {
         sev: e.severity,
         id: e.id,
-        hasOrgs: e.affected.length ? 1 : 0,
+        hasOrgs: e.affectedShown.length ? 1 : 0,
         cwfis: isCwfisWildfire(e) ? 1 : 0,
       };
       if (!shouldRenderHazardArea(e, props.hasOrgs)) return;
@@ -389,9 +406,9 @@
     // warning) carry no shape and no coordinate at all — which is why the map used to show
     // hardly any weather. Anchor them to the middle of the organizations they affect,
     // which is the part of the alert this tool actually cares about.
-    if (e.affected && e.affected.length) {
+    if (e.affectedShown && e.affectedShown.length) {
       var sx = 0, sy = 0, n = 0;
-      e.affected.forEach(function (id) {
+      e.affectedShown.forEach(function (id) {
         var o = orgById[id];
         if (o) { sx += o.lon; sy += o.lat; n++; }
       });
@@ -492,7 +509,7 @@
   function hazardPointGeoJSON() {
     var feats = [];
     visibleEvents().forEach(function (e) {
-      var hasOrgs = e.affected.length ? 1 : 0;
+      var hasOrgs = e.affectedShown.length ? 1 : 0;
       if (!shouldRenderHazardMarker(e, hasOrgs)) return;
       var p = markerPoint(e);
       if (!p) return;
@@ -890,8 +907,8 @@
     // This is a "who needs help" queue, so events touching mapped organizations lead —
     // ranked by severity, then by how many are affected. Events with no mapped
     // organizations in range fall below, still ordered by severity.
-    var touches = e.affected.length ? 1 : 0;
-    return touches * 1e7 + e.severity * 1000 + Math.min(e.affected.length, 999);
+    var touches = e.affectedShown.length ? 1 : 0;
+    return touches * 1e7 + e.severity * 1000 + Math.min(e.affectedShown.length, 999);
   }
 
   // Watches are anticipatory — conditions could develop — while warnings and observed
@@ -904,13 +921,15 @@
   // list of events touching it. This is the "who needs attention" set a support
   // organization acts on. `filterFn` narrows which events count (e.g. isWatch);
   // `ignoreLayerFilters` gives the full picture regardless of panel chips (for the brief).
-  function affectedIndex(filterFn, ignoreLayerFilters) {
+  function affectedIndex(filterFn, ignoreLayerFilters, includeHiddenOrgs) {
     var cats = activeCats();
     var byOrg = {};
     state.events.forEach(function (e) {
       if (!ignoreLayerFilters && !cats[e.category]) return;
       if (filterFn && !filterFn(e)) return;
-      e.affected.forEach(function (id) {
+      // Display callers respect the "My list only" view; the assistant facade passes
+      // includeHiddenOrgs and applies its own private-list consent filter instead.
+      (includeHiddenOrgs ? e.affected : e.affectedShown).forEach(function (id) {
         if (!byOrg[id]) byOrg[id] = { org: orgById[id], events: [] };
         byOrg[id].events.push(e);
       });
@@ -926,7 +945,7 @@
     if (!state.events.length || state.panelMode !== "list") { bar.hidden = true; wbar.hidden = true; return; }
     bar.hidden = false;
     var n = affectedIndex(notWatch).length;
-    var evCount = visibleEvents().filter(function (e) { return notWatch(e) && e.affected.length; }).length;
+    var evCount = visibleEvents().filter(function (e) { return notWatch(e) && e.affectedShown.length; }).length;
     if (n === 0) {
       bar.classList.add("calm");
       bar.innerHTML = '<span class="impact-num">0</span><span class="impact-text"><b>No mapped organizations</b> are in an active hazard area right now.</span>';
@@ -969,7 +988,7 @@
     var shown = evs.slice(0, state.listLimit);
     shown.forEach(function (e) {
       var m = catMeta(e.category);
-      var n = e.affected.length;
+      var n = e.affectedShown.length;
       var orgLine = n
         ? '<div class="evt-orgs hit"><b>' + n + "</b> organization" + (n === 1 ? "" : "s") + " in the affected area" + approxFlag(e) + "</div>"
         : '<div class="evt-orgs">No mapped organizations in range</div>';
@@ -1071,7 +1090,7 @@
     d.hidden = false;
     d.scrollTop = 0;
     var m = catMeta(e.category);
-    var affected = e.affected.map(function (id) { return orgById[id]; }).filter(Boolean)
+    var affected = e.affectedShown.map(function (id) { return orgById[id]; }).filter(Boolean)
       .sort(function (a, b) { return a.name.localeCompare(b.name); });
 
     var html = '<button class="back-btn" id="detail-back">' +
@@ -1303,11 +1322,16 @@
   /* ---------------- stats + filters ---------------- */
 
   function renderStats() {
-    var counts = { library: 0, museum: 0, archive: 0 }, picked = 0;
-    ORGS.forEach(function (o) { counts[o.type]++; if (o.selected) picked++; });
-    el("stats").textContent = ORGS.length + " organizations · " +
+    var counts = { library: 0, museum: 0, archive: 0 }, picked = 0, shown = 0;
+    ORGS.forEach(function (o) {
+      if (o.selected) picked++;
+      if (!orgShown(o)) return;
+      shown++;
+      counts[o.type]++;
+    });
+    el("stats").textContent = (state.onlySelected ? "Your list only: " : "") + shown + " organizations · " +
       counts.library + " libraries · " + counts.museum + " museums · " + counts.archive + " archives" +
-      (picked ? " · " + picked + " selected" : "");
+      (picked && !state.onlySelected ? " · " + picked + " selected" : "");
   }
 
   function renderAboutHazardIcons() {
@@ -1399,7 +1423,7 @@
   function countQuietAreas() {
     var cats = activeCats(), n = 0;
     state.events.forEach(function (e) {
-      if (!cats[e.category] || e.affected.length || isCwfisWildfire(e)) return;
+      if (!cats[e.category] || e.affectedShown.length || isCwfisWildfire(e)) return;
       if (e.geometry || (e.point && e.radiusKm)) n++;
     });
     return n;
@@ -1423,6 +1447,19 @@
       b.addEventListener("click", function () { setTypeFilter(t, !state.typeOn[t]); });
       tf.appendChild(b);
     });
+
+    // Appears once an uploaded list is active: hides the public dataset so the map and
+    // every count reflect just the user's organizations. Visibility is managed by
+    // refreshSelectButton so it tracks list changes.
+    var mine = document.createElement("button");
+    mine.className = "chip";
+    mine.id = "only-mine-chip";
+    mine.hidden = true;
+    mine.setAttribute("aria-pressed", String(state.onlySelected));
+    mine.title = "Show only the organizations from your uploaded spreadsheet and hide the public dataset.";
+    mine.innerHTML = '<span class="cdot star"></span>My list only';
+    mine.addEventListener("click", function () { setOnlySelected(!state.onlySelected); });
+    tf.appendChild(mine);
 
     var lf = el("layer-filters");
     Object.keys(LAYER_GROUPS).forEach(function (g) {
@@ -1463,9 +1500,9 @@
       var q = input.value.trim().toLowerCase();
       if (q.length < 2) { close(); return; }
       matches = ORGS.filter(function (o) {
-        return o.name.toLowerCase().indexOf(q) !== -1 ||
+        return orgShown(o) && (o.name.toLowerCase().indexOf(q) !== -1 ||
           o.city.toLowerCase().indexOf(q) !== -1 ||
-          o.region.toLowerCase().indexOf(q) !== -1;
+          o.region.toLowerCase().indexOf(q) !== -1);
       }).sort(function (a, b) {
         function score(o) {
           var name = o.name.toLowerCase(), city = o.city.toLowerCase(), region = o.region.toLowerCase();
@@ -1713,16 +1750,37 @@
     });
   }
 
-  // A zone upgrade can both clear false county-level matches and, rarely, add newly
-  // covered organizations, so impact and every surface showing it re-render.
-  function afterZoneUpgrade() {
-    computeImpact();
+  // Redraw the map and whichever panel view is open after anything that changes which
+  // organizations count as affected (zone upgrades, the My-list-only toggle).
+  function rerenderImpactViews() {
     refreshMapData();
     renderLegend();
     var sel = state.selectedEventId && state.events.find(function (e) { return e.id === state.selectedEventId; });
     if (state.panelMode === "affected") showAffected(state.affectedMode);
     else if (state.panelMode === "detail" && sel) renderDetail(sel);
     else if (state.panelMode === "list") showList();
+  }
+
+  // A zone upgrade can both clear false county-level matches and, rarely, add newly
+  // covered organizations, so impact recomputes and every surface re-renders.
+  function afterZoneUpgrade() {
+    computeImpact();
+    rerenderImpactViews();
+  }
+
+  // The "My list only" toggle. Impact matching is untouched; only the shown set and the
+  // surfaces derived from it change, so switching is instant in both directions.
+  function setOnlySelected(on) {
+    state.onlySelected = !!on && selectedCount() > 0;
+    try {
+      if (state.onlySelected) localStorage.setItem(ONLY_LS, "1");
+      else localStorage.removeItem(ONLY_LS);
+    } catch (e) {}
+    var chip = el("only-mine-chip");
+    if (chip) chip.setAttribute("aria-pressed", String(state.onlySelected));
+    refreshShownAffected();
+    renderStats();
+    rerenderImpactViews();
   }
 
   function computeImpact() {
@@ -1738,6 +1796,7 @@
         if (orgInEvent(o, e)) { e.affected.push(o.id); o._affected = true; }
       });
     });
+    refreshShownAffected();
   }
 
   function loadFeeds() {
@@ -1926,7 +1985,7 @@
 
     var evRows = evs.slice(0, 25).map(function (e) {
       return '<tr><td>' + esc(e.title) + '</td><td class="sev s' + e.severity + '">' + esc(e.sevLabel) + "</td><td>" +
-        esc(String(e.area || "").slice(0, 70)) + '</td><td class="num">' + e.affected.length + "</td><td>" +
+        esc(String(e.area || "").slice(0, 70)) + '</td><td class="num">' + e.affectedShown.length + "</td><td>" +
         (e.expires ? esc(fmtTime(e.expires)) : "Not listed") + "</td></tr>";
     }).join("");
 
@@ -1952,7 +2011,8 @@
       (state.updatedAt ? " · live data updated " + esc(timeAgo(state.updatedAt)) : "") + "</p></div></div>" +
       '<div class="noprint">Use your browser’s Print command to print or save this brief as a PDF.</div>' +
       '<div class="keyrow">' +
-      '<div class="key"><b>' + ORGS.length + "</b><span>organizations monitored" + (picked ? " (" + picked + " on your list)" : "") + "</span></div>" +
+      '<div class="key"><b>' + (state.onlySelected ? picked : ORGS.length) + "</b><span>organizations monitored" +
+      (state.onlySelected ? " (your uploaded list only)" : picked ? " (" + picked + " on your list)" : "") + "</span></div>" +
       '<div class="key"><b>' + state.events.length + "</b><span>active events</span></div>" +
       '<div class="key"><b>' + nowIdx.length + "</b><span>needing attention now</span></div>" +
       '<div class="key"><b>' + watchIdx.length + "</b><span>on the watchlist</span></div>" +
@@ -2082,6 +2142,11 @@
 
   function selectionChanged() {
     rebuildOrgs();
+    // Removing the list while "My list only" is on would otherwise blank the map.
+    if (state.onlySelected && !ORGS.some(function (o) { return o.selected; })) {
+      state.onlySelected = false;
+      try { localStorage.removeItem(ONLY_LS); } catch (e) {}
+    }
     renderStats();
     computeImpact();
     // An uploaded list can put organizations in counties whose alerts were not worth
@@ -2113,6 +2178,11 @@
     btn.classList.toggle("has-list", !!n);
     badge.hidden = !n;
     badge.textContent = n ? compactCount(n) : "";
+    var mineChip = el("only-mine-chip");
+    if (mineChip) {
+      mineChip.hidden = !n;
+      mineChip.setAttribute("aria-pressed", String(state.onlySelected));
+    }
     btn.title = n
       ? "Your list is active: " + n + " organization" + (n === 1 ? "" : "s") + ". Open to replace or remove it."
       : "Select overlay: track your own list of organizations";
@@ -2147,7 +2217,7 @@
     return Security.filterAssistantOrganizations(ORGS, includeSelected);
   }
   function assistantEntries(includeSelected, filterFn) {
-    return affectedIndex(filterFn).filter(function (entry) { return includeSelected || !entry.org.selected; });
+    return affectedIndex(filterFn, false, true).filter(function (entry) { return includeSelected || !entry.org.selected; });
   }
   function assistantAffectedCount(e, includeSelected) {
     return e.affected.reduce(function (count, id) {
@@ -2192,6 +2262,7 @@
         totalOrganizations: orgs.length,
         selectedOrganizations: includeSelected ? orgs.filter(function (o) { return o.selected; }).length : 0,
         privateDataIncluded: includeSelected,
+        mapShowsOnlyPrivateList: !!state.onlySelected,
         organizationsByType: counts,
         countriesCovered: ["United States", "Canada", "Mexico"],
         activeEventCount: vis.length,

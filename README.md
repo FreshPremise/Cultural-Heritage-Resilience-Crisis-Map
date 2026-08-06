@@ -20,7 +20,8 @@ wildfires, earthquakes, heat and cold, and air-quality alerts.
 - Lists affected organizations and ranks events that may require attention.
 - Searches organizations by name, city, or state or province.
 - Exports affected-organization lists as CSV files.
-- Uploads a private CSV or TSV list of organizations to view on the map.
+- Uploads a private CSV or TSV list of organizations to view on the map, with a
+  "My list only" view that hides the public dataset.
 - Provides an optional bring-your-own-key assistant for questions about the loaded map.
 
 ## Running it
@@ -113,8 +114,11 @@ The right-hand panel provides three ways to work with affected organizations:
 
 An organization can upload a list of organizations to view on the map. The file remains
 in that browser's local storage. Imports are limited to 5 MB and 10,000 rows. An
-active-list indicator remains visible until the user chooses **Remove my list**. See
-[PRIVACY.md](PRIVACY.md) for details.
+active-list indicator remains visible until the user chooses **Remove my list**. Once a
+list is active, a **My list only** filter chip can hide the public dataset entirely, so
+the map, impact counts, affected views, situation briefs, and exports reflect just the
+uploaded organizations. The setting persists in that browser and turns itself off if the
+list is removed. See [PRIVACY.md](PRIVACY.md) for details.
 
 ## Assistant (experimental, optional, bring-your-own-key)
 

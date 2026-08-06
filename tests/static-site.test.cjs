@@ -46,7 +46,7 @@ test("release metadata, update discovery, and cache-busting reload stay synchron
   assert.ok(assetVersions.length >= 8);
   assert.ok(assetVersions.every((value) => value === version.assetVersion));
   assert.match(html, /id="update-notice"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
-  assert.match(html, /Build 2026\.08\.06\.1 · Released August 6, 2026/);
+  assert.match(html, /Build 2026\.08\.06\.2 · Released August 6, 2026/);
   assert.match(app, /new URL\("\/version\.json", window\.location\.origin\)/);
   assert.match(app, /cache: "no-store"/);
   assert.match(app, /credentials: "same-origin"/);
@@ -159,7 +159,7 @@ test("CWFIS wildfire perimeters and markers stay visible independently of the qu
     visibility(false, { feed: "fires", category: "fire", geometry: null }, 0),
     { area: false, marker: true }
   );
-  assert.match(app, /e\.affected\.length \|\| isCwfisWildfire\(e\)/);
+  assert.match(app, /e\.affectedShown\.length \|\| isCwfisWildfire\(e\)/);
   assert.match(app, /\["get", "cwfis"\][^\n]*0\.13/);
   assert.match(app, /\["get", "cwfis"\][^\n]*0\.65/);
 });
@@ -373,6 +373,52 @@ test("a county-matched alert upgrades to its warned-zone polygon and sheds outsi
   assert.equal(context.result.approxAfter, false);
   assert.equal(context.result.salemAfter, false, "Salem must drop out once the true zone polygon is applied");
   assert.equal(context.result.warmSpringsAfter, true, "organizations inside the zone must still match");
+});
+
+test("the My list only view narrows every display surface to uploaded organizations", () => {
+  assert.match(app, /mine\.id = "only-mine-chip"/);
+  assert.match(app, /var ONLY_LS = "hw-only-selected"/);
+  assert.match(app, /state\.typeOn\[o\.type\] && orgShown\(o\)/);
+  assert.match(app, /orgShown\(o\) && \(o\.name\.toLowerCase\(\)/);
+  assert.match(app, /\(includeHiddenOrgs \? e\.affected : e\.affectedShown\)\.forEach/);
+  assert.match(app, /affectedIndex\(filterFn, false, true\)/);
+  assert.match(app, /mapShowsOnlyPrivateList: !!state\.onlySelected/);
+  assert.match(app, /localStorage\.getItem\("hw-only-selected"\) === "1" && ORGS\.some/);
+  assert.match(html, /a "My list only" button appears/);
+  assert.match(css, /\.chip \.cdot\.star \{/);
+
+  const orgShownSource = app.match(/function orgShown\(o\) \{[\s\S]*?\}/)?.[0];
+  const refreshSource = app.match(/function refreshShownAffected\(\) \{[\s\S]*?\n  \}/)?.[0];
+  assert.ok(orgShownSource && refreshSource, "My-list-only helpers are missing");
+  const context = {
+    state: {
+      onlySelected: true,
+      events: [
+        { affected: ["pub1", "mine1", "mine2"] },
+        { affected: ["pub2"] },
+      ],
+    },
+    orgById: { pub1: {}, pub2: {}, mine1: { selected: true }, mine2: { selected: true } },
+    result: null,
+  };
+  vm.runInNewContext(
+    `${orgShownSource}; ${refreshSource};
+     refreshShownAffected();
+     const onCounts = state.events.map(e => e.affectedShown.length);
+     const fullCounts = state.events.map(e => e.affected.length);
+     const shownPublicOn = orgShown({});
+     const shownMineOn = orgShown({ selected: true });
+     state.onlySelected = false;
+     refreshShownAffected();
+     result = { onCounts, fullCounts, shownPublicOn, shownMineOn,
+       offIdentity: state.events.every(e => e.affectedShown === e.affected) };`,
+    context
+  );
+  assert.deepEqual(Array.from(context.result.onCounts), [2, 0], "shown-affected must keep only uploaded organizations while the view is on");
+  assert.deepEqual(Array.from(context.result.fullCounts), [3, 1], "the full match set must stay untouched");
+  assert.equal(context.result.shownPublicOn, false);
+  assert.equal(context.result.shownMineOn, true);
+  assert.equal(context.result.offIdentity, true, "turning the view off must restore the full affected list");
 });
 
 test("county-level matches are labeled approximate until the exact zone arrives", () => {
