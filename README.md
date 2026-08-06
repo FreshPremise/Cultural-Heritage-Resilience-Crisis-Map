@@ -16,7 +16,7 @@ wildfires, earthquakes, heat and cold, and air-quality alerts.
   and Mexico.
 - Loads current weather alerts, earthquakes, wildfire incidents and perimeters, and
   other natural events from public sources.
-- Matches organizations to hazards by published boundary, US county code, or distance.
+- Matches organizations to hazards by published boundary, official warned-zone outline, or distance.
 - Lists affected organizations and ranks events that may require attention.
 - Searches organizations by name, city, or state or province.
 - Exports affected-organization lists as CSV files.
@@ -87,9 +87,14 @@ Each organization is checked against each event using the most precise method av
 
 1. **Polygon** — storm-based warnings (tornado, severe thunderstorm, flash flood) and all
    Canadian alerts include a shape; organizations are matched by point-in-polygon.
-2. **County code** — ~90% of US alerts (heat, winter, air quality, flood watches) carry no
-   polygon, only county FIPS codes. Every US organization has been reverse-geocoded to its
-   county (see `scripts/`), so these match exactly by county.
+2. **Warned-zone outline** — ~90% of US alerts (heat, winter, fire weather, air quality,
+   flood watches) carry no polygon, only county FIPS codes, and a county is often far
+   larger than the warned zone: a fire weather watch for one mountain slope lists every
+   county the zone touches. Organizations are matched by county first (every US
+   organization has been reverse-geocoded to its county, see `scripts/`), and the app then
+   fetches the alert's official zone outlines from api.weather.gov, caches them in the
+   browser, and re-matches by point-in-polygon. Until the outlines arrive, the match is
+   labeled "county-level" in the panel and popups.
 3. **Radius** — point events (earthquakes, wildfire incidents, EONET points) match
    organizations within a severity-scaled radius.
 

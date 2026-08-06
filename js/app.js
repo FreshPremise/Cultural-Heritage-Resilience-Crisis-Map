@@ -143,7 +143,7 @@
 
   /* ---------------- release updates ---------------- */
 
-  var APP_BUILD = "2026.07.24.1";
+  var APP_BUILD = "2026.08.06.1";
   var VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
   var latestAvailableBuild = "";
   var versionCheckPending = false;
@@ -856,7 +856,8 @@
     if (evs.length) {
       html += '<div class="p-events"><div class="p-events-title">Active events affecting this location</div>';
       evs.forEach(function (e) {
-        html += '<div class="p-evt" data-evt="' + esc(e.id) + '"><span class="sdot" style="background:' + SEV_FILL[e.severity] + '"></span><span>' + esc(e.title) + "</span></div>";
+        html += '<div class="p-evt" data-evt="' + esc(e.id) + '"' + (isApproxMatch(e) ? ' title="' + APPROX_TITLE + '"' : "") +
+          '><span class="sdot" style="background:' + SEV_FILL[e.severity] + '"></span><span>' + esc(e.title) + approxFlag(e) + "</span></div>";
       });
       html += "</div>";
     } else {
@@ -970,7 +971,7 @@
       var m = catMeta(e.category);
       var n = e.affected.length;
       var orgLine = n
-        ? '<div class="evt-orgs hit"><b>' + n + "</b> organization" + (n === 1 ? "" : "s") + " in the affected area</div>"
+        ? '<div class="evt-orgs hit"><b>' + n + "</b> organization" + (n === 1 ? "" : "s") + " in the affected area" + approxFlag(e) + "</div>"
         : '<div class="evt-orgs">No mapped organizations in range</div>';
       var when = e.time ? timeAgo(e.time) : "";
       html += '<div class="event-item" data-evt="' + esc(e.id) + '" role="listitem">' +
@@ -1085,6 +1086,11 @@
     if (e.time) html += kv("Onset", fmtTime(e.time) + " (" + timeAgo(e.time) + ")");
     if (e.expires) html += kv("Until", fmtTime(e.expires));
     html += kv("Affected", affected.length + " mapped organization" + (affected.length === 1 ? "" : "s"));
+    if (affected.length && isApproxMatch(e)) {
+      html += kv("Match", '<span title="' + APPROX_TITLE + '">County-level (approximate)</span>');
+    } else if (e.zoneUpgraded) {
+      html += kv("Match", '<span title="Organizations are matched against the exact warned-zone outline published for this alert.">Warned-zone outline</span>');
+    }
     html += kv("Source", esc(e.source));
     html += "</div>";
 
@@ -1556,6 +1562,169 @@
     }).join("");
   }
 
+  /* ---------------- NWS warned-zone polygon upgrade ---------------- */
+
+  // Most NWS alerts arrive with no polygon, only county codes, and a county is often far
+  // larger than the warned zone: a Fire Weather Watch for the Cascade slopes lists every
+  // county the zone touches, so a valley-floor library 90 miles away lights up. For
+  // county-matched alerts that touch mapped organizations, fetch the alert's real zone
+  // polygons (its affectedZones URLs on api.weather.gov), cache them, and upgrade the
+  // event to exact point-in-polygon matching. Until the polygons arrive, or if the fetch
+  // fails, the match stays county-level and is labeled approximate in the UI.
+  var ZONE_LS = "hw-zone-geoms";
+  var ZONE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // zone boundaries are near-static
+  var ZONE_MAX_STORED = 80; // stay well under the localStorage quota
+  var ZONE_MAX_ENTRY_CHARS = 300000; // keep single monster coastal zones out of storage
+  var ZONE_FETCH_CONCURRENCY = 4;
+  var ZONE_FETCH_MAX_BYTES = 8 * 1024 * 1024;
+  var ZONE_RETRY_MS = 10 * 60 * 1000;
+  var zoneMem = null; // zone key -> GeoJSON geometry
+  var zoneAt = {}; // zone key -> time cached, for age-based pruning
+  var zoneFailedAt = {}; // zone key -> last failed fetch, to pace retries
+
+  // Forecast and fire zones can share an id (ORZ011 names two different shapes), so the
+  // cache key keeps the zone type from the URL path.
+  function zoneKey(url) {
+    var m = /^https:\/\/api\.weather\.gov\/zones\/([a-z]+)\/([A-Z0-9]{4,10})$/.exec(String(url || ""));
+    return m ? m[1] + "/" + m[2] : null;
+  }
+
+  function loadZoneStore() {
+    if (zoneMem) return;
+    zoneMem = {};
+    var now = Date.now();
+    try {
+      var raw = JSON.parse(localStorage.getItem(ZONE_LS) || "{}");
+      Object.keys(raw).forEach(function (k) {
+        var entry = raw[k];
+        if (entry && entry.g && now - (entry.t || 0) < ZONE_TTL_MS) { zoneMem[k] = entry.g; zoneAt[k] = entry.t; }
+      });
+    } catch (e) {}
+  }
+
+  function persistZoneStore() {
+    var keys = Object.keys(zoneMem).sort(function (a, b) { return (zoneAt[b] || 0) - (zoneAt[a] || 0); });
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var raw = {};
+      keys.slice(0, attempt ? Math.floor(ZONE_MAX_STORED / 2) : ZONE_MAX_STORED).forEach(function (k) {
+        if (JSON.stringify(zoneMem[k]).length <= ZONE_MAX_ENTRY_CHARS) raw[k] = { g: zoneMem[k], t: zoneAt[k] || Date.now() };
+      });
+      try { localStorage.setItem(ZONE_LS, JSON.stringify(raw)); return; } catch (e) {}
+    }
+    try { localStorage.removeItem(ZONE_LS); } catch (e) {}
+  }
+
+  // All of an alert's zones must be present before any are used: matching against a
+  // partial zone set could clear an organization the missing zone actually covers.
+  function mergeZoneGeometries(geoms) {
+    var polys = [];
+    for (var i = 0; i < geoms.length; i++) {
+      var g = geoms[i];
+      if (!g) return null;
+      if (g.type === "Polygon") polys.push(g.coordinates);
+      else if (g.type === "MultiPolygon") polys = polys.concat(g.coordinates);
+      else return null;
+    }
+    return polys.length ? { type: "MultiPolygon", coordinates: polys } : null;
+  }
+
+  function applyZoneGeometry(e, keys) {
+    var merged = mergeZoneGeometries(keys.map(function (k) { return zoneMem[k]; }));
+    if (!merged) return false;
+    e.geometry = merged;
+    e._bbox = null; // computeImpact rebuilds it from the new polygons
+    e.zoneUpgraded = true;
+    return true;
+  }
+
+  // County-coded and still unresolved: organizations are matched by county membership,
+  // not by the warned zone itself.
+  function isApproxMatch(e) {
+    return !e.geometry && !!(e.fips && e.fips.length);
+  }
+
+  var APPROX_TITLE = "Matched by county: this alert lists whole counties and its exact warned-zone outline has not loaded yet, so some organizations may sit outside the warned zone.";
+  function approxFlag(e) {
+    return isApproxMatch(e) ? ' <span class="approx-flag" title="' + APPROX_TITLE + '">county-level</span>' : "";
+  }
+
+  function eventZoneKeys(e) {
+    if (e.feed !== "nws" || e.geometry || !e.zones || !e.zones.length) return null;
+    var keys = [];
+    for (var i = 0; i < e.zones.length; i++) {
+      var k = zoneKey(e.zones[i]);
+      if (!k) return null;
+      keys.push(k);
+    }
+    return keys;
+  }
+
+  // Cache pass, run before impact matching, so already-known zones upgrade their alerts
+  // in the same paint at no network cost.
+  function applyCachedZonePolygons() {
+    loadZoneStore();
+    state.events.forEach(function (e) {
+      var keys = eventZoneKeys(e);
+      if (keys && keys.every(function (k) { return zoneMem[k]; })) applyZoneGeometry(e, keys);
+    });
+  }
+
+  // Fetch pass, run after impact matching: only alerts currently claiming mapped
+  // organizations are worth network requests. Results land in the cache, so follow-up
+  // passes and the next 5-minute refresh apply them synchronously.
+  function fetchMissingZonePolygons(generation) {
+    if (!zoneMem) loadZoneStore();
+    var queue = {};
+    var now = Date.now();
+    state.events.forEach(function (e) {
+      var keys = eventZoneKeys(e);
+      if (!keys || !e.affected || !e.affected.length) return;
+      keys.forEach(function (k, i) {
+        if (!zoneMem[k] && now - (zoneFailedAt[k] || 0) > ZONE_RETRY_MS) queue[k] = e.zones[i];
+      });
+    });
+    var pending = Object.keys(queue);
+    if (!pending.length) return;
+    var idx = 0;
+    function worker() {
+      if (idx >= pending.length) return Promise.resolve();
+      var key = pending[idx++];
+      return Feeds.fetchJSON(queue[key], 20000, ZONE_FETCH_MAX_BYTES)
+        .then(function (data) {
+          var g = data && data.geometry;
+          if (!g || (g.type !== "Polygon" && g.type !== "MultiPolygon")) throw new Error("zone has no polygon");
+          zoneMem[key] = g;
+          zoneAt[key] = Date.now();
+        })
+        .catch(function () { zoneFailedAt[key] = Date.now(); })
+        .then(worker);
+    }
+    var workers = [];
+    for (var w = 0; w < ZONE_FETCH_CONCURRENCY && w < pending.length; w++) workers.push(worker());
+    Promise.all(workers).then(function () {
+      persistZoneStore();
+      if (generation !== feedGeneration) return; // a newer refresh owns state.events now
+      var upgraded = 0;
+      state.events.forEach(function (e) {
+        var keys = eventZoneKeys(e);
+        if (keys && keys.every(function (k) { return zoneMem[k]; }) && applyZoneGeometry(e, keys)) upgraded++;
+      });
+      if (upgraded) afterZoneUpgrade();
+    });
+  }
+
+  // A zone upgrade can both clear false county-level matches and, rarely, add newly
+  // covered organizations, so impact and every surface showing it re-render.
+  function afterZoneUpgrade() {
+    computeImpact();
+    refreshMapData();
+    renderLegend();
+    var sel = state.selectedEventId && state.events.find(function (e) { return e.id === state.selectedEventId; });
+    if (state.panelMode === "affected") showAffected(state.affectedMode);
+    else if (state.panelMode === "detail" && sel) renderDetail(sel);
+    else if (state.panelMode === "list") showList();
+  }
+
   function computeImpact() {
     ORGS.forEach(function (o) { o._affected = false; });
     state.events.forEach(function (e) {
@@ -1626,6 +1795,7 @@
         var loaded = cached && now - new Date(cached.lastSuccess).getTime() <= FEED_STALE_TTL_MS ? cached.lastSuccess : null;
         return loaded && (!oldest || loaded < oldest) ? loaded : oldest;
       }, null);
+      applyCachedZonePolygons();
       computeImpact();
       refreshMapData();
       renderTrend(recordHistory(affectedIndex(notWatch, true).length));
@@ -1642,6 +1812,7 @@
       btn.classList.remove("busy");
       btn.disabled = false;
       setFeedStatus(statuses);
+      fetchMissingZonePolygons(generation);
     });
   }
 
@@ -1913,6 +2084,9 @@
     rebuildOrgs();
     renderStats();
     computeImpact();
+    // An uploaded list can put organizations in counties whose alerts were not worth
+    // zone fetches before; resolve those now rather than waiting for the next refresh.
+    fetchMissingZonePolygons(feedGeneration);
     renderLegend();
     refreshMapData();
     if (state.panelMode === "affected") showAffected(state.affectedMode);
@@ -1990,6 +2164,7 @@
       id: e.id, title: e.title, category: e.category, hazard: catMeta(e.category).label,
       severity: e.severity, severityLabel: e.sevLabel, area: e.area || "",
       affectedCount: assistantAffectedCount(e, includeSelected), source: e.source,
+      matchPrecision: isApproxMatch(e) ? "county-approximate" : "footprint",
       startsAt: e.time || null, endsAt: e.expires || null,
     };
   }

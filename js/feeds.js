@@ -150,6 +150,13 @@
         return String(s).length === 6 ? String(s).slice(1) : String(s);
       });
 
+      // The warned area itself is the alert's UGC zone set, one api.weather.gov URL per
+      // zone in affectedZones. Kept (host-checked) so county-matched alerts can be
+      // upgraded to their true zone polygons after impact matching (see app.js).
+      var zoneUrls = (Array.isArray(p.affectedZones) ? p.affectedZones : [])
+        .filter(function (u) { return typeof u === "string" && /^https:\/\/api\.weather\.gov\/zones\//.test(u); })
+        .slice(0, 80);
+
       out.push(
         mkEvent({
           id: "nws:" + (p.id || f.id || Math.random().toString(36).slice(2)),
@@ -165,6 +172,7 @@
           source: p.senderName || "National Weather Service",
           geometry: geometryIsUsable(f.geometry) ? f.geometry : null,
           fips: fips.length ? fips : null,
+          zones: zoneUrls.length ? zoneUrls : null,
           point: null,
           radiusKm: null,
         })
@@ -460,6 +468,7 @@
       { id: "quakes", name: "Earthquakes (USGS)", fetcher: fetchQuakes },
       { id: "eonet", name: "Continental events (NASA EONET)", fetcher: fetchEONET },
     ],
+    fetchJSON,
     test: { fetchJSON, geometryIsUsable },
   };
 })();

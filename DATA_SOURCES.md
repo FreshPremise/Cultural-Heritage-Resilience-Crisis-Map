@@ -38,8 +38,9 @@ available under the ODbL.
 | [OpenFreeMap](https://openfreemap.org/) / OpenStreetMap | Basemap tiles and labels |
 
 Feed data is fetched in the browser approximately every five minutes. Polygon events use
-point-in-polygon matching, county alerts use exact FIPS matching, and point events use a
-severity-scaled radius. A failed refresh retains the last successful response for that
+point-in-polygon matching, county-coded US alerts match by FIPS code and are then upgraded
+to point-in-polygon against the alert's official warned-zone outlines (fetched from
+api.weather.gov and cached in the browser), and point events use a severity-scaled radius. A failed refresh retains the last successful response for that
 source for no more than one hour and marks it stale in the interface. Expired alerts are
 removed from cached responses. Paginated sources are loaded before impact matching,
 subject to a 5,000-feature and 64 MB per-response safety boundary; this avoids silently

@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const html = fs.readFileSync(path.join(root, "index.html"), "utf8");
 const app = fs.readFileSync(path.join(root, "js", "app.js"), "utf8");
+const feeds = fs.readFileSync(path.join(root, "js", "feeds.js"), "utf8");
 const chat = fs.readFileSync(path.join(root, "js", "chat.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
@@ -45,7 +46,7 @@ test("release metadata, update discovery, and cache-busting reload stay synchron
   assert.ok(assetVersions.length >= 8);
   assert.ok(assetVersions.every((value) => value === version.assetVersion));
   assert.match(html, /id="update-notice"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
-  assert.match(html, /Build 2026\.07\.24\.1 · Released July 24, 2026/);
+  assert.match(html, /Build 2026\.08\.06\.1 · Released August 6, 2026/);
   assert.match(app, /new URL\("\/version\.json", window\.location\.origin\)/);
   assert.match(app, /cache: "no-store"/);
   assert.match(app, /credentials: "same-origin"/);
@@ -302,4 +303,89 @@ test("large live result sets are paged only after impact matching", () => {
   assert.match(app, /var evs = visibleEvents\(\)\.slice\(\)\.sort/);
   assert.match(app, /var shown = evs\.slice\(0, state\.listLimit\)/);
   assert.match(app, /state\.listLimit \+= EVENT_LIST_PAGE_SIZE/);
+});
+
+test("NWS alerts keep host-checked warned-zone URLs for the polygon upgrade", () => {
+  assert.match(feeds, /zones: zoneUrls\.length \? zoneUrls : null/);
+  assert.ok(
+    feeds.includes("/^https:\\/\\/api\\.weather\\.gov\\/zones\\//.test(u)"),
+    "affectedZones URLs must be restricted to api.weather.gov"
+  );
+  assert.match(feeds, /window\.Feeds = \{[\s\S]*?\n    fetchJSON,/);
+});
+
+test("a county-matched alert upgrades to its warned-zone polygon and sheds outside organizations", () => {
+  const names = [
+    "pointInRing", "pointInPolygon", "pointInGeometry", "orgInEvent", "zoneKey",
+    "mergeZoneGeometries", "applyZoneGeometry", "isApproxMatch", "eventZoneKeys",
+  ];
+  const sources = names.map((name) => {
+    const source = app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(source, `${name} is missing`);
+    return source;
+  });
+
+  // The live case verified on 2026-08-06: a Fire Weather Watch for fire zone ORZ703
+  // (Warm Springs Reservation, east slopes of the Cascades) listed Marion County in its
+  // SAME codes because the zone clips the county's mountain edge, which flagged Salem
+  // organizations 90 miles away on the valley floor. The zone polygon excludes Salem.
+  const context = {
+    zoneMem: {},
+    salem: { lon: -123.041, lat: 44.939, fips: "41047" },
+    warmSprings: { lon: -121.13, lat: 44.63, fips: "41031" },
+    event: {
+      feed: "nws",
+      geometry: null,
+      fips: ["41005", "41031", "41047", "41065"],
+      zones: ["https://api.weather.gov/zones/fire/ORZ703"],
+      affected: ["seed"],
+    },
+    result: null,
+  };
+  vm.runInNewContext(
+    `${sources.join(";\n")};\n` +
+      `result = {
+        countyMatchSalem: orgInEvent(salem, event),
+        approxBefore: isApproxMatch(event),
+        keys: eventZoneKeys(event),
+        forecastKey: zoneKey("https://api.weather.gov/zones/forecast/ORZ011"),
+        fireKey: zoneKey("https://api.weather.gov/zones/fire/ORZ011"),
+        foreignKey: zoneKey("https://example.com/zones/fire/ORZ011"),
+        partialMerge: mergeZoneGeometries([{ type: "Polygon", coordinates: [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]] }, null]),
+      };
+      zoneMem["fire/ORZ703"] = { type: "Polygon", coordinates: [[[-121.9, 44.45], [-120.8, 44.45], [-120.8, 45.3], [-121.9, 45.3], [-121.9, 44.45]]] };
+      result.applied = applyZoneGeometry(event, ["fire/ORZ703"]);
+      result.geometryType = event.geometry && event.geometry.type;
+      result.approxAfter = isApproxMatch(event);
+      result.salemAfter = orgInEvent(salem, event);
+      result.warmSpringsAfter = orgInEvent(warmSprings, event);`,
+    context
+  );
+  assert.equal(context.result.countyMatchSalem, true, "county fallback should match Salem before the upgrade");
+  assert.equal(context.result.approxBefore, true);
+  assert.deepEqual(Array.from(context.result.keys), ["fire/ORZ703"]);
+  assert.equal(context.result.forecastKey, "forecast/ORZ011");
+  assert.equal(context.result.fireKey, "fire/ORZ011");
+  assert.equal(context.result.foreignKey, null, "non-NWS zone URLs must not produce cache keys");
+  assert.equal(context.result.partialMerge, null, "a partial zone set must never be used for matching");
+  assert.equal(context.result.applied, true);
+  assert.equal(context.result.geometryType, "MultiPolygon");
+  assert.equal(context.result.approxAfter, false);
+  assert.equal(context.result.salemAfter, false, "Salem must drop out once the true zone polygon is applied");
+  assert.equal(context.result.warmSpringsAfter, true, "organizations inside the zone must still match");
+});
+
+test("county-level matches are labeled approximate until the exact zone arrives", () => {
+  assert.match(app, /applyCachedZonePolygons\(\);\n      computeImpact\(\);/);
+  assert.match(app, /fetchMissingZonePolygons\(generation\);/);
+  assert.match(app, /fetchMissingZonePolygons\(feedGeneration\);/);
+  assert.match(app, /Feeds\.fetchJSON\(queue\[key\], 20000, ZONE_FETCH_MAX_BYTES\)/);
+  assert.match(app, /class="approx-flag"/);
+  assert.match(app, /County-level \(approximate\)/);
+  assert.match(app, /matchPrecision: isApproxMatch\(e\) \? "county-approximate" : "footprint"/);
+  assert.match(app, /localStorage\.removeItem\(ZONE_LS\)/);
+  assert.match(css, /\.approx-flag \{/);
+  const approxTitle = app.match(/var APPROX_TITLE = "([^"]+)"/)?.[1] || "";
+  assert.ok(approxTitle.length > 40, "approximate-match explanation is missing");
+  assert.doesNotMatch(approxTitle, /—/);
 });
