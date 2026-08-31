@@ -143,7 +143,7 @@
 
   /* ---------------- release updates ---------------- */
 
-  var APP_BUILD = "2026.08.06.2";
+  var APP_BUILD = "2026.08.28.1";
   var VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
   var latestAvailableBuild = "";
   var versionCheckPending = false;
@@ -314,6 +314,65 @@
     if (localStorage.getItem("hw-quiet") === "1") state.showQuiet = true;
     if (localStorage.getItem("hw-only-selected") === "1" && ORGS.some(function (o) { return o.selected; })) state.onlySelected = true;
   } catch (e) {}
+
+  function setMobileFiltersExpanded(expanded) {
+    var head = el("panel-filters"), button = el("mobile-filter-toggle");
+    if (!head || !button) return;
+    head.classList.toggle("filters-collapsed", !expanded);
+    button.setAttribute("aria-expanded", String(!!expanded));
+    button.setAttribute("aria-label", expanded ? "Hide map filters" : "Show map filters");
+  }
+
+  function updateMobileFilterSummary() {
+    var summary = el("mobile-filter-summary");
+    if (!summary) return;
+    var types = Object.keys(state.typeOn);
+    var layers = Object.keys(state.layerOn);
+    var typeCount = types.filter(function (key) { return state.typeOn[key]; }).length;
+    var layerCount = layers.filter(function (key) { return state.layerOn[key]; }).length;
+    summary.textContent = typeCount + "/" + types.length + " organization types · " +
+      layerCount + "/" + layers.length + " hazard layers" + (state.onlySelected ? " · my list only" : "");
+  }
+
+  function updateListPriorityLabel() {
+    var button = el("list-priority-toggle"), label = el("list-priority-label");
+    if (!button || !label) return;
+    label.textContent = button.getAttribute("aria-pressed") === "true"
+      ? "Show map" : (state.panelMode === "list" ? "More list" : "More details");
+  }
+
+  function setListPriority(on) {
+    var main = el("app-main"), button = el("list-priority-toggle");
+    if (!main || !button) return;
+    main.classList.toggle("list-priority", !!on);
+    button.setAttribute("aria-pressed", String(!!on));
+    button.setAttribute("aria-label", on ? "Restore the balanced map and information panel" : "Give the information panel more screen space");
+    updateListPriorityLabel();
+    if (on) setMobileFiltersExpanded(false);
+    window.requestAnimationFrame(function () { if (map) map.resize(); });
+  }
+
+  function prepareMapForNavigation() {
+    var main = el("app-main");
+    if (!main || !main.classList.contains("list-priority")) return;
+    setListPriority(false);
+    // Explicit navigation needs the restored dimensions before camera fitting.
+    // Marker clicks do not use this helper and keep the current map view intact.
+    if (map) map.resize();
+  }
+
+  function setupMobilePanelControls() {
+    var filters = el("mobile-filter-toggle"), priority = el("list-priority-toggle");
+    if (filters) filters.addEventListener("click", function () {
+      setMobileFiltersExpanded(filters.getAttribute("aria-expanded") !== "true");
+    });
+    if (priority) priority.addEventListener("click", function () {
+      setListPriority(priority.getAttribute("aria-pressed") !== "true");
+    });
+    setMobileFiltersExpanded(false);
+    setListPriority(false);
+    updateMobileFilterSummary();
+  }
 
   function activeCats() {
     var set = {};
@@ -968,6 +1027,7 @@
 
   function renderList() {
     state.panelMode = "list";
+    updateListPriorityLabel();
     el("event-detail").hidden = true;
     el("affected-view").hidden = true;
     el("event-list").hidden = false;
@@ -1020,6 +1080,19 @@
 
   /* ---------------- panel: event detail ---------------- */
 
+  function eventFramePadding() {
+    // The panel is a flex sibling, so it never covers the map. Keep the inset
+    // symmetric and small enough for either dimension of a compact mobile map.
+    var container = el("map");
+    var horizontal = Math.min(24, Math.floor((container ? container.clientWidth : 0) / 5));
+    var vertical = Math.min(24, Math.floor((container ? container.clientHeight : 0) / 5));
+    return { top: vertical, bottom: vertical, left: horizontal, right: horizontal };
+  }
+
+  function pointFramePadding() {
+    return { top: 0, bottom: 0, left: 0, right: 0 };
+  }
+
   // `frame` controls whether the map moves. Choosing an event from the panel list frames
   // it, because you asked to go there. Clicking a marker already on screen must NOT move
   // the map — you are pointing at a thing you can see, and yanking the view away is
@@ -1031,12 +1104,13 @@
     state.selectedEventId = id;
 
     if (opts.frame !== false) {
+      prepareMapForNavigation();
       if (popup) popup.remove();
       if (e.geometry) {
         var b = geomBounds(e.geometry);
-        if (b) map.fitBounds(b, { padding: { top: 60, bottom: 60, left: 60, right: 400 }, maxZoom: 8, duration: 700 });
+        if (b) map.fitBounds(b, { padding: eventFramePadding(), maxZoom: 8, duration: 700 });
       } else if (e.point) {
-        map.easeTo({ center: e.point, zoom: Math.max(map.getZoom(), 6), padding: { right: 380 } });
+        map.easeTo({ center: e.point, zoom: Math.max(map.getZoom(), 6), padding: pointFramePadding() });
       }
     }
     renderDetail(e);
@@ -1056,7 +1130,7 @@
       (n
         ? '<div class="hp-orgs"><b>' + n + "</b> organization" + (n === 1 ? "" : "s") + " in this area</div>"
         : '<div class="hp-orgs quiet">No mapped organizations in this area</div>') +
-      '<div class="hp-cta">Full details are in the panel on the right &rarr;</div>' +
+      '<div class="hp-cta">Full details are in the information panel.</div>' +
       "</div>";
     popup.setLngLat(lngLat).setHTML(html).addTo(map);
   }
@@ -1081,6 +1155,7 @@
 
   function renderDetail(e) {
     state.panelMode = "detail";
+    updateListPriorityLabel();
     el("event-list").hidden = true;
     el("list-title-row").hidden = true;
     el("impact-bar").hidden = true;
@@ -1150,7 +1225,8 @@
       node.addEventListener("click", function () {
         var o = orgById[node.getAttribute("data-org")];
         if (!o) return;
-        map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: { right: 380 } });
+        prepareMapForNavigation();
+        map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: pointFramePadding() });
         showOrgPopup(o.id);
       });
     });
@@ -1203,6 +1279,7 @@
   function showAffected(mode) {
     mode = mode === "watch" ? "watch" : "now";
     state.panelMode = "affected";
+    updateListPriorityLabel();
     state.affectedMode = mode;
     state.selectedEventId = null;
     if (popup) popup.remove();
@@ -1273,7 +1350,8 @@
       node.addEventListener("click", function () {
         var o = orgById[node.getAttribute("data-org")];
         if (!o) return;
-        map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: { right: 380 } });
+        prepareMapForNavigation();
+        map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: pointFramePadding() });
         showOrgPopup(o.id);
       });
     });
@@ -1440,6 +1518,7 @@
     var tf = el("type-filters");
     ["library", "museum", "archive"].forEach(function (t) {
       var b = document.createElement("button");
+      b.type = "button";
       b.className = "chip";
       b.dataset.type = t;
       b.setAttribute("aria-pressed", "true");
@@ -1452,6 +1531,7 @@
     // every count reflect just the user's organizations. Visibility is managed by
     // refreshSelectButton so it tracks list changes.
     var mine = document.createElement("button");
+    mine.type = "button";
     mine.className = "chip";
     mine.id = "only-mine-chip";
     mine.hidden = true;
@@ -1464,6 +1544,7 @@
     var lf = el("layer-filters");
     Object.keys(LAYER_GROUPS).forEach(function (g) {
       var b = document.createElement("button");
+      b.type = "button";
       b.className = "chip";
       b.dataset.layer = g;
       b.setAttribute("aria-pressed", "true");
@@ -1479,6 +1560,7 @@
     state.typeOn[t] = !!on;
     var chip = document.querySelector('#type-filters [data-type="' + t + '"]');
     if (chip) chip.setAttribute("aria-pressed", String(state.typeOn[t]));
+    updateMobileFilterSummary();
     refreshMapData();
   }
   function setLayerFilter(g, on) {
@@ -1486,6 +1568,7 @@
     state.listLimit = EVENT_LIST_PAGE_SIZE;
     var chip = document.querySelector('#layer-filters [data-layer="' + g + '"]');
     if (chip) chip.setAttribute("aria-pressed", String(state.layerOn[g]));
+    updateMobileFilterSummary();
     refreshMapData();
     if (state.panelMode === "affected") showAffected(state.affectedMode);
     else showList();
@@ -1538,6 +1621,7 @@
     }
     function frame(orgs) {
       if (orgs.length === 1) { pick(orgs[0]); return; }
+      prepareMapForNavigation();
       input.value = "";
       close();
       if (popup) popup.remove();
@@ -1546,14 +1630,15 @@
         west = Math.min(west, o.lon); east = Math.max(east, o.lon);
         south = Math.min(south, o.lat); north = Math.max(north, o.lat);
       });
-      if (west === east && south === north) map.easeTo({ center: [west, south], zoom: 10, duration: 700 });
-      else map.fitBounds([[west, south], [east, north]], { padding: 70, maxZoom: 10, duration: 700 });
+      if (west === east && south === north) map.easeTo({ center: [west, south], zoom: 10, duration: 700, padding: pointFramePadding() });
+      else map.fitBounds([[west, south], [east, north]], { padding: eventFramePadding(), maxZoom: 10, duration: 700 });
     }
     function pick(o) {
       if (!o) return;
+      prepareMapForNavigation();
       input.value = "";
       close();
-      map.easeTo({ center: [o.lon, o.lat], zoom: 10 });
+      map.easeTo({ center: [o.lon, o.lat], zoom: 10, padding: pointFramePadding() });
       showOrgPopup(o.id);
     }
     input.addEventListener("input", run);
@@ -1778,6 +1863,7 @@
     } catch (e) {}
     var chip = el("only-mine-chip");
     if (chip) chip.setAttribute("aria-pressed", String(state.onlySelected));
+    updateMobileFilterSummary();
     refreshShownAffected();
     renderStats();
     rerenderImpactViews();
@@ -1916,7 +2002,8 @@
   ResetViewControl.prototype.onRemove = function () { this._container.remove(); this._map = undefined; };
 
   function resetView() {
-    if (map) map.easeTo({ center: DEFAULT_VIEW.center, zoom: DEFAULT_VIEW.zoom, duration: 600 });
+    prepareMapForNavigation();
+    if (map) map.easeTo({ center: DEFAULT_VIEW.center, zoom: DEFAULT_VIEW.zoom, duration: 600, padding: pointFramePadding() });
   }
 
   /* ---------------- history: 24-hour impact trend ---------------- */
@@ -2183,6 +2270,7 @@
       mineChip.hidden = !n;
       mineChip.setAttribute("aria-pressed", String(state.onlySelected));
     }
+    updateMobileFilterSummary();
     btn.title = n
       ? "Your list is active: " + n + " organization" + (n === 1 ? "" : "s") + ". Open to replace or remove it."
       : "Select overlay: track your own list of organizations";
@@ -2328,7 +2416,8 @@
       var o = orgById[id];
       if (!o) return { ok: false, error: "No organization with that id" };
       if (o.selected && !opts.includeSelected) return { ok: false, error: "Private uploaded organizations are not available to the assistant without user permission" };
-      map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9) });
+      prepareMapForNavigation();
+      map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: pointFramePadding() });
       showOrgPopup(o.id);
       return { ok: true, focused: orgSummary(o) };
     },
@@ -2352,6 +2441,7 @@
     renderStats();
     renderLegend();
     buildFilters();
+    setupMobilePanelControls();
     renderAboutHazardIcons();
     setupSearch();
     el("update-reload").addEventListener("click", reloadForUpdate);
@@ -2418,6 +2508,7 @@
     var about = el("about");
     el("about-btn").addEventListener("click", function () { about.showModal(); });
     el("about-close").addEventListener("click", function () { about.close(); });
+    el("about-close-top").addEventListener("click", function () { about.close(); });
     about.addEventListener("click", function (e) { if (e.target === about) about.close(); });
 
     // Selected-organization overlay dialog.
@@ -2425,6 +2516,7 @@
     el("select-btn").addEventListener("click", function () { refreshSelectDialog(); selectDlg.showModal(); });
     refreshSelectDialog();
     el("select-close").addEventListener("click", function () { selectDlg.close(); });
+    el("select-close-top").addEventListener("click", function () { selectDlg.close(); });
     selectDlg.addEventListener("click", function (e) { if (e.target === selectDlg) selectDlg.close(); });
     el("select-file").addEventListener("change", function () {
       var f = this.files && this.files[0];
@@ -2461,6 +2553,7 @@
     // Outreach draft dialog.
     var outDlg = el("outreach");
     el("outreach-close").addEventListener("click", function () { outDlg.close(); });
+    el("outreach-close-top").addEventListener("click", function () { outDlg.close(); });
     outDlg.addEventListener("click", function (e) { if (e.target === outDlg) outDlg.close(); });
     el("outreach-copy").addEventListener("click", function () {
       var ta = el("outreach-text"), btn = el("outreach-copy");

@@ -14,6 +14,18 @@ const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
 const privacy = fs.readFileSync(path.join(root, "privacy.html"), "utf8");
 const version = JSON.parse(fs.readFileSync(path.join(root, "version.json"), "utf8"));
 
+function openingTag(id) {
+  const match = html.match(new RegExp(`<[^>]+\\bid="${id}"[^>]*>`));
+  assert.ok(match, `missing opening tag for #${id}`);
+  return match[0];
+}
+
+function functionSource(name) {
+  const match = app.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`));
+  assert.ok(match, `missing ${name}()`);
+  return match[0];
+}
+
 test("README shows the repository-owned application screenshot before What it does", () => {
   const imageRef = "docs/images/cultural-heritage-resilience-map.png";
   const imagePosition = readme.indexOf(`](${imageRef})`);
@@ -25,6 +37,37 @@ test("README shows the repository-owned application screenshot before What it do
 
 test("README identifies the Windows launcher as an alternative to the manual server steps", () => {
   assert.match(readme, /\*\*Windows alternative:\*\* Instead of following steps 3–5 above/);
+});
+
+test("README requires Node.js 22 or later for the quoted test glob", () => {
+  assert.match(readme, /Run the automated checks with Node\.js 22 or later:/);
+  assert.ok(readme.includes('node --test "tests/*.test.cjs"'));
+  assert.doesNotMatch(readme, /Node(?:\.js)? 20 or later/);
+});
+
+test("README mobile-readiness link points to an existing document", () => {
+  const readinessPath = "MOBILE-READINESS.md";
+  assert.ok(readme.includes(`[mobile and tablet usability testing](${readinessPath})`));
+  assert.ok(fs.statSync(path.join(root, readinessPath)).isFile(), "mobile-readiness document is missing");
+});
+
+test("public mobile guidance identifies the current build and outstanding device checks", () => {
+  const mobile = fs.readFileSync(path.join(root, "MOBILE-READINESS.md"), "utf8");
+  assert.match(mobile, /^# Mobile support and known limitations/);
+  assert.ok(mobile.includes(`Current build: \`${version.build}\``));
+  assert.ok(mobile.includes(`Asset version: \`${version.assetVersion}\``));
+  assert.match(mobile, /physical iPhone/i);
+  assert.match(mobile, /screen-reader/i);
+  assert.doesNotMatch(mobile, /NEXT-CHAT-HANDOFF|47f3d60|Obtain explicit authorization/);
+});
+
+test("public guidance does not assume the information panel is on the right", () => {
+  assert.match(readme, /The information panel provides three ways to work with affected organizations:/);
+  assert.match(html, /Their icons and colors match the filter controls\./);
+  assert.match(app, /<div class="hp-cta">Full details are in the information panel\.<\/div>/);
+  assert.doesNotMatch(readme, /The right-hand panel provides three ways/);
+  assert.doesNotMatch(html, /Their icons and colors match the controls on the right/);
+  assert.doesNotMatch(app, /Full details are in the panel on the right/);
 });
 
 test("runtime scripts and styles are local and consistently cache-versioned", () => {
@@ -46,7 +89,10 @@ test("release metadata, update discovery, and cache-busting reload stay synchron
   assert.ok(assetVersions.length >= 8);
   assert.ok(assetVersions.every((value) => value === version.assetVersion));
   assert.match(html, /id="update-notice"[^>]*role="status"[^>]*aria-live="polite"[^>]*hidden/);
-  assert.match(html, /Build 2026\.08\.06\.2 · Released August 6, 2026/);
+  const releaseDate = new Date(`${version.released}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
+  });
+  assert.ok(html.includes(`Build ${version.build} · Released ${releaseDate}`));
   assert.match(app, /new URL\("\/version\.json", window\.location\.origin\)/);
   assert.match(app, /cache: "no-store"/);
   assert.match(app, /credentials: "same-origin"/);
@@ -101,10 +147,191 @@ test("the default Groq model is current and supports tool use", () => {
   assert.doesNotMatch(chat, /llama-3\.3-70b-versatile/);
 });
 
-test("collapsed mobile assistant and narrow header remain usable", () => {
+test("mobile controls have semantic collapsed defaults and hidden content stays hidden", () => {
+  assert.match(css, /:where\(\[hidden\]\)\s*\{\s*display:\s*none\s*!important;\s*\}/);
+
+  const panel = openingTag("panel-filters");
+  const filters = openingTag("mobile-filter-toggle");
+  const priority = openingTag("list-priority-toggle");
+  assert.match(panel, /class="[^"]*\bfilters-collapsed\b[^"]*"/);
+  assert.match(filters, /\btype="button"/);
+  assert.match(filters, /\baria-expanded="false"/);
+  assert.match(filters, /\baria-controls="filter-groups"/);
+  assert.match(html, /id="filter-groups" class="filter-groups"/);
+  assert.match(priority, /\btype="button"/);
+  assert.match(priority, /\baria-pressed="false"/);
+  assert.match(priority, /\baria-controls="map panel"/);
+  const controls = html.match(/<div class="mobile-panel-controls">([\s\S]*?)<\/div>/)?.[1] || "";
+  const titleRow = html.match(/<div[^>]*id="list-title-row"[^>]*>([\s\S]*?)<\/div>/)?.[1] || "";
+  assert.match(controls, /id="mobile-filter-toggle"/);
+  assert.match(controls, /id="list-priority-toggle"/);
+  assert.match(titleRow, /Active events/);
+  assert.doesNotMatch(titleRow, /list-priority-toggle/);
+  assert.match(openingTag("impact-bar"), /\bhidden\b/);
+  assert.match(openingTag("watch-bar"), /\bhidden\b/);
+});
+
+test("mobile filter and list-priority state stay synchronized", () => {
+  const filterSetter = functionSource("setMobileFiltersExpanded");
+  const prioritySetter = functionSource("setListPriority");
+  const setup = functionSource("setupMobilePanelControls");
+
+  assert.match(filterSetter, /classList\.toggle\("filters-collapsed", !expanded\)/);
+  assert.match(filterSetter, /setAttribute\("aria-expanded", String\(!!expanded\)\)/);
+  assert.match(prioritySetter, /classList\.toggle\("list-priority", !!on\)/);
+  assert.match(prioritySetter, /setAttribute\("aria-pressed", String\(!!on\)\)/);
+  assert.match(prioritySetter, /updateListPriorityLabel\(\);/);
+  assert.match(prioritySetter, /requestAnimationFrame\(function \(\) \{ if \(map\) map\.resize\(\); \}\)/);
+  assert.match(setup, /setMobileFiltersExpanded\(false\)/);
+  assert.match(setup, /setListPriority\(false\)/);
+  assert.match(app, /buildFilters\(\);\s*setupMobilePanelControls\(\);/);
+  assert.match(css, /#app-main\.list-priority #map\s*\{\s*height:\s*clamp\(96px, 22%, 180px\);\s*\}/);
+  assert.match(css, /\.panel-head\.filters-collapsed \.filter-groups\s*\{\s*display:\s*none;\s*\}/);
+});
+
+test("list-priority labels follow the visible panel content and pressed state", () => {
+  const source = functionSource("updateListPriorityLabel");
+  for (const mode of ["list", "detail", "affected"]) {
+    for (const pressed of [false, true]) {
+      const label = { textContent: "" };
+      const button = { getAttribute: () => String(pressed) };
+      const context = {
+        state: { panelMode: mode },
+        el: (id) => id === "list-priority-toggle" ? button : label,
+      };
+      vm.runInNewContext(`${source}; updateListPriorityLabel();`, context);
+      assert.equal(label.textContent, pressed ? "Show map" : mode === "list" ? "More list" : "More details", `${mode}, pressed=${pressed}`);
+    }
+  }
+  for (const [name, mode] of [["renderList", "list"], ["renderDetail", "detail"], ["showAffected", "affected"]]) {
+    assert.match(functionSource(name), new RegExp(`state\\.panelMode = "${mode}";\\s*updateListPriorityLabel\\(\\);`));
+  }
+});
+
+test("explicit navigation restores map space before moving while marker selection preserves it", () => {
+  const sources = ["prepareMapForNavigation", "selectEvent"].map(functionSource).join(";\n");
+  function navigate(priorityActive, opts, geometry = false) {
+    const calls = [];
+    const main = priorityActive === null ? null : { classList: { contains: () => priorityActive } };
+    const event = { id: "event", point: [-84, 34] };
+    if (geometry) event.geometry = {};
+    const context = {
+      state: { events: [event] }, opts, popup: null,
+      el: () => main,
+      setListPriority: (on) => { calls.push(`priority:${on}`); priorityActive = on; },
+      map: {
+        resize: () => calls.push("resize"), getZoom: () => 4,
+        easeTo: () => calls.push("easeTo"), fitBounds: () => calls.push("fitBounds"),
+      },
+      geomBounds: () => [[-85, 33], [-83, 35]],
+      eventFramePadding: () => ({}), pointFramePadding: () => ({}),
+      renderDetail: () => calls.push("detail"),
+    };
+    vm.runInNewContext(`${sources}; selectEvent("event", opts);`, context);
+    return calls;
+  }
+  assert.deepEqual(navigate(true, {}), ["priority:false", "resize", "easeTo", "detail"]);
+  assert.deepEqual(navigate(true, {}, true), ["priority:false", "resize", "fitBounds", "detail"]);
+  assert.deepEqual(navigate(false, {}), ["easeTo", "detail"]);
+  assert.deepEqual(navigate(null, {}), ["easeTo", "detail"]);
+  assert.deepEqual(navigate(true, { frame: false }), ["detail"]);
+
+  for (const name of ["renderDetail", "showAffected", "resetView"]) {
+    assert.match(functionSource(name), /prepareMapForNavigation\(\);\s*(?:if \(map\) )?map\.easeTo/);
+  }
+  const search = functionSource("setupSearch");
+  assert.match(search, /function frame\(orgs\)[\s\S]*?prepareMapForNavigation\(\);[\s\S]*?map\.fitBounds/);
+  assert.match(search, /function pick\(o\)[\s\S]*?prepareMapForNavigation\(\);[\s\S]*?map\.easeTo/);
+  assert.match(app, /focusOrganization: function \(id, opts\) \{[\s\S]*?prepareMapForNavigation\(\);\s*map\.easeTo/);
+  for (const name of ["showOrgPopup", "showHazardPopup"]) {
+    assert.doesNotMatch(functionSource(name), /prepareMapForNavigation|setListPriority|map\.(?:easeTo|fitBounds)/);
+  }
+});
+
+test("responsive rules cover tablets, touch targets, and device safe areas", () => {
+  const mobile = css.match(/@media\s+\(max-width:\s*900px\)\s*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(mobile, "the mobile layout must include widths through 900 pixels");
+  assert.match(html, /<meta name="viewport" content="[^"]*viewport-fit=cover[^"]*">/);
+  for (const edge of ["top", "right", "bottom", "left"]) {
+    assert.match(css, new RegExp(`env\\(safe-area-inset-${edge}\\)`));
+  }
+  assert.match(css, /@media \(max-width: 1200px\)[\s\S]*?\.stats, \.brand-sub, \.feed-label \{ display: none; \}/);
+  assert.match(css, /@media \(max-width: 1200px\)[\s\S]*?\.search \{ width: auto; min-width: 0; flex: 1; margin-left: 0; \}/);
+  assert.match(mobile, /#map\s*\{\s*height:\s*46%;\s*flex:\s*none;\s*\}/);
+  assert.match(mobile, /#feed-status\s*\{\s*display:\s*none;\s*\}/);
+  assert.match(css, /\.mobile-panel-controls,\s*\.mobile-filter-toggle\s*\{\s*display:\s*none;\s*\}/);
+  assert.match(mobile, /\.mobile-panel-controls\s*\{[^}]*display:\s*flex;[^}]*min-height:\s*44px/);
+  assert.match(mobile, /\.evt-meta\s*\{[^}]*display:\s*-webkit-box;[^}]*-webkit-line-clamp:\s*2;[^}]*-webkit-box-orient:\s*vertical;[^}]*overflow:\s*hidden;/);
+  assert.match(css, /\.mobile-filter-toggle\s*\{[^}]*min-height:\s*44px/);
+  assert.match(css, /\.chip\s*\{[^}]*min-height:\s*40px/);
+  assert.match(css, /\.list-priority-toggle\s*\{[^}]*min-height:\s*40px/);
+  assert.match(css, /#panel\s*\{[^}]*padding-bottom:\s*env\(safe-area-inset-bottom\)/);
+  assert.match(css, /#panel\s*\{[^}]*min-width:\s*0/);
+  assert.match(css, /\.event-list\s*\{[^}]*padding:\s*2px 0 14px;/);
+  assert.doesNotMatch(css, /\.event-list\s*\{[^}]*safe-area-inset-bottom/);
+  assert.match(css, /\.update-notice\s*\{[^}]*top:\s*calc\(64px \+ env\(safe-area-inset-top\)\)/);
+  assert.match(css, /@media \(max-width: 680px\)[\s\S]*?\.update-notice\s*\{[^}]*top:\s*calc\(60px \+ env\(safe-area-inset-top\)\)/);
   assert.match(css, /#assistant\.collapsed \{ display: none; width: 0; \}/);
   assert.match(css, /@media \(max-width: 680px\)[\s\S]*#feed-status \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.brand-text \{ display: none; \}/);
+});
+
+test("stacked list-priority mode keeps map controls in one short row", () => {
+  const mobile = css.match(/@media\s+\(max-width:\s*900px\)\s*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(mobile, "all stacked mobile maps need horizontally arranged controls");
+  assert.match(mobile, /#app-main\.list-priority \.maplibregl-ctrl-top-left\s*\{[^}]*display:\s*flex/);
+  assert.match(mobile, /#app-main\.list-priority \.maplibregl-ctrl-top-left \.maplibregl-ctrl-group\s*\{[^}]*display:\s*flex/);
+  assert.match(mobile, /button \+ button\s*\{[^}]*border-top:\s*none !important;[^}]*border-left:/);
+});
+
+test("short phone landscape uses side-by-side panels and bounded impact text", () => {
+  const landscape = css.match(/@media\s+\(max-width:\s*900px\) and \(max-height:\s*500px\) and \(orientation:\s*landscape\)\s*\{([\s\S]*?)\n\}/)?.[1];
+  assert.ok(landscape, "short landscape needs its own layout guard");
+  assert.match(landscape, /main\s*\{\s*flex-direction:\s*row;\s*\}/);
+  assert.match(landscape, /#map\s*\{[^}]*height:\s*auto;[^}]*flex:\s*1;/);
+  assert.match(landscape, /#panel\s*\{[^}]*width:\s*clamp\(248px,\s*48vw,\s*400px\);[^}]*flex:\s*none;/);
+  assert.match(landscape, /#app-main\.list-priority #map\s*\{[^}]*height:\s*auto;[^}]*flex:\s*0 0 96px;/);
+  assert.match(landscape, /#app-main\.list-priority #panel\s*\{[^}]*width:\s*auto;[^}]*flex:\s*1;/);
+  assert.match(landscape, /#app-main\.list-priority \.maplibregl-ctrl-top-left\s*\{[^}]*display:\s*block/);
+  assert.match(landscape, /#app-main\.list-priority \.maplibregl-ctrl-top-left \.maplibregl-ctrl-group\s*\{[^}]*display:\s*block/);
+  assert.match(landscape, /button \+ button\s*\{[^}]*border-top:\s*1px solid var\(--line\) !important;[^}]*border-left:\s*none !important;/);
+  assert.match(landscape, /\.impact-text\s*\{[^}]*min-width:\s*0;[^}]*overflow:\s*hidden;[^}]*text-overflow:\s*ellipsis;[^}]*white-space:\s*nowrap;/);
+});
+
+test("map framing fits the actual container and centers every point destination", () => {
+  const sources = ["eventFramePadding", "pointFramePadding"].map(functionSource).join(";\n");
+  const zero = { top: 0, bottom: 0, left: 0, right: 0 };
+  const cases = [
+    ["desktop", { clientWidth: 1000, clientHeight: 700 }, { top: 24, bottom: 24, left: 24, right: 24 }],
+    ["phone", { clientWidth: 390, clientHeight: 300 }, { top: 24, bottom: 24, left: 24, right: 24 }],
+    ["narrow 96px map", { clientWidth: 96, clientHeight: 300 }, { top: 24, bottom: 24, left: 19, right: 19 }],
+    ["short 96px map", { clientWidth: 390, clientHeight: 96 }, { top: 19, bottom: 19, left: 24, right: 24 }],
+    ["absent map container", null, zero],
+  ];
+  for (const [label, container, eventPadding] of cases) {
+    const context = { el: (id) => id === "map" ? container : null, result: null };
+    vm.runInNewContext(`${sources}; result = { event: eventFramePadding(), point: pointFramePadding() };`, context);
+    assert.deepEqual(JSON.parse(JSON.stringify(context.result)), { event: eventPadding, point: zero }, label);
+  }
+  assert.doesNotMatch(app, /panelIsBelowMap|\bpadding:\s*70\b|\bright:\s*(?:380|400)\b/);
+  assert.match(app, /fitBounds\(b, \{ padding: eventFramePadding\(\)/);
+  assert.match(app, /fitBounds\(\[\[west, south\], \[east, north\]\], \{ padding: eventFramePadding\(\)/);
+  const pointMoves = app.match(/map\.easeTo\(\{[^}]+\}\)/g) || [];
+  assert.equal(pointMoves.length, 7);
+  for (const move of pointMoves) assert.match(move, /padding:\s*pointFramePadding\(\)/);
+});
+
+test("scrollable dialogs provide accessible top close controls", () => {
+  for (const id of ["about-close-top", "select-close-top", "outreach-close-top"]) {
+    const button = openingTag(id);
+    assert.match(button, /class="dialog-close"/);
+    assert.match(button, /\btype="button"/);
+    assert.match(button, /\baria-label="[^"]+"/);
+    assert.match(app, new RegExp(`el\\("${id}"\\)\\.addEventListener\\("click"`));
+  }
+  assert.match(css, /\.about-inner\s*\{[^}]*overflow-y:\s*auto/);
+  assert.match(css, /\.dialog-close\s*\{[^}]*position:\s*sticky[^}]*width:\s*44px[^}]*height:\s*44px/s);
+  assert.match(css, /\.dialog-close\s*\{[^}]*top:\s*max\(8px,\s*env\(safe-area-inset-top\)\)/);
 });
 
 test("the private overlay stays visibly active until the user removes it", () => {

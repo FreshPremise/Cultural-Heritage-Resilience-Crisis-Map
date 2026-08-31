@@ -50,7 +50,7 @@
     },
     {
       name: "list_events",
-      description: "List active hazard events, most severe first. Optionally filter by category (tropical, tornado, storm, flood, fire, quake, winter, heat, volcano, other), a minimum severity 1-4, or only events that affect mapped organizations.",
+      description: "List active hazard events, most severe first. Optionally filter by category (tropical, tornado, storm, flood, fire, quake, winter, heat, volcano, air, other), a minimum severity 1-4, or only events that affect mapped organizations.",
       props: {
         category: { type: "string", description: "Optional hazard category filter" },
         min_severity: { type: "integer", description: "Optional minimum severity, 1 (minor) to 4 (extreme)" },
@@ -68,7 +68,7 @@
     },
     {
       name: "set_hazard_layers",
-      description: "Choose which hazard layers are shown on the map and in the event panel. Provide the full set of layer ids to keep on; the rest are hidden. Valid ids: storms, flood, fire, quake, winter, other.",
+      description: "Choose which hazard layers are shown on the map and in the event panel. Provide the full set of layer ids to keep on; the rest are hidden. Valid ids: storms, flood, fire, quake, winter, air, other.",
       props: { layers: { type: "array", items: { type: "string" }, description: "Layer ids to show" } },
       required: ["layers"],
       run: function (i) { return window.HW.setHazardLayers(i.layers || []); },

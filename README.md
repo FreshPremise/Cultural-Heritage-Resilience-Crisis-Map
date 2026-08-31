@@ -55,6 +55,13 @@ The local server is recommended because browsers may restrict live data requests
 browsers, but if the map cannot load its live sources, use the local server instructions
 above.
 
+## Phone and tablet use
+
+The same application adapts to phone, tablet, and desktop browsers. On phones, filters
+start collapsed and the list-size control can give more space to events or details.
+See [mobile support and known limitations](MOBILE-READINESS.md) for tested layouts and
+the remaining physical-device and accessibility checks.
+
 ## Data shown on the map
 
 **Organizations:** The map includes a curated 583-place demonstration set plus samples
@@ -104,7 +111,7 @@ organizations determine the order within that group.
 
 ## Using the results
 
-The right-hand panel provides three ways to work with affected organizations:
+The information panel provides three ways to work with affected organizations:
 
 - **Impact summary:** shows the number of organizations inside active hazard areas.
 - **Affected-organization list:** groups organizations by state or province and links each
@@ -163,8 +170,10 @@ js/app.js             map, impact matching, panel, popups, search, filters, them
 js/security.js        shared URL, CSV, and assistant privacy guards
 js/chat.js            optional assistant panel: BYO-key LLM + tool-calling over window.HW
 tests/                dependency-free Node tests plus local-server Python tests
+deployment/firebase.json version-controlled Firebase Hosting configuration
 vendor/maplibre-gl/   pinned MapLibre GL JS runtime, license, and integrity manifest
 scripts/serve_local.py restricted loopback-only development server
+scripts/prepare_firebase.mjs prepares an allowlisted Firebase package without publishing
 scripts/              data conversion, validation, and county-FIPS build tools
 ```
 
@@ -175,7 +184,7 @@ provenance; ambiguous matches remain empty. `scripts/apply_official_websites.mjs
 reapplies the separate 401-record official-site search review stored in
 `data/official-library-websites.json`.
 
-Run the automated checks with Node 20 or later:
+Run the automated checks with Node.js 22 or later:
 
 ```bash
 node --test "tests/*.test.cjs"
@@ -183,10 +192,32 @@ node --check js/security.js
 node --check js/feeds.js
 node --check js/app.js
 node --check js/chat.js
-python -m unittest tests/test_serve_local.py
+python -B -m unittest tests/test_serve_local.py
 node scripts/check_vendor_integrity.mjs
 node scripts/check_sensitive_files.mjs
 ```
+
+## Preparing a Firebase package
+
+With Node.js 22 or later, run this from the project folder, choosing an output directory
+that does not already exist:
+
+```bash
+node scripts/prepare_firebase.mjs outputs/firebase-release
+```
+
+The script copies only the 15 allowlisted runtime files into `public` and places the
+version-controlled [Firebase configuration](deployment/firebase.json) beside that
+directory. It refuses to overwrite an existing package. Tests, Python caches, private
+lists, internal notes, and Git metadata are not included. This command does not upload
+or deploy anything, and does not include credentials or select a Firebase project.
+
+Use the generated package for a separately authorized Firebase deployment. Keep
+`firebase.json` beside `public`, not inside it, and do not publish the repository root.
+The configuration retains the security headers and fresh HTML/version responses without
+clearing the browser's entire site cache. Versioned asset URLs identify each release.
+See Firebase's [Hosting configuration](https://firebase.google.com/docs/hosting/full-config)
+and [cache behavior](https://firebase.google.com/docs/hosting/manage-cache) documentation.
 
 ## Possible future directions
 
@@ -203,7 +234,7 @@ recovery needs. Possible future development includes:
   regions.
 - Working with associations, consortia, government agencies, and other organizations to
   adapt the application for the institutions and networks they support.
-- Improving space issues in mobile version.
+- Continuing [mobile and tablet usability testing](MOBILE-READINESS.md) across real devices and assistive technologies.
 
 ## Development and attribution
 

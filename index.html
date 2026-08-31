@@ -2,15 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="application-version" content="2026.08.06.2">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="application-version" content="2026.08.28.1">
 <title>Cultural Heritage Resilience — crisis monitor for cultural heritage</title>
 <meta name="description" content="Live situational awareness for libraries, museums, and archives across North America.">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tiles.openfreemap.org https://tilecache.rainviewer.com https://*.tilecache.rainviewer.com; font-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='4.7' y='4.7' width='6.6' height='6.6' transform='rotate(45 8 8)' fill='%238C2F24'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=27">
-<link rel="stylesheet" href="styles.css?v=27">
+<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=30">
+<link rel="stylesheet" href="styles.css?v=30">
 </head>
 <body>
 <header id="topbar">
@@ -60,7 +60,7 @@
   <button id="update-reload" type="button">Reload update</button>
 </div>
 
-<main>
+<main id="app-main">
   <aside id="assistant" class="collapsed" aria-label="AI assistant">
     <div class="asst-head">
       <span class="asst-title">Assistant <span class="asst-experimental">Experimental</span></span>
@@ -127,12 +127,25 @@
     <div id="legend" aria-label="Map legend"></div>
   </div>
   <aside id="panel">
-    <div class="panel-head">
-      <p class="filter-hint">Tap a button to show or hide it on the map.</p>
-      <div class="filter-label">Organizations</div>
-      <div class="filters" id="type-filters" role="group" aria-label="Organization types"></div>
-      <div class="filter-label">Hazards</div>
-      <div class="filters" id="layer-filters" role="group" aria-label="Hazard layers"></div>
+    <div class="panel-head filters-collapsed" id="panel-filters">
+      <div class="mobile-panel-controls">
+        <button id="mobile-filter-toggle" class="mobile-filter-toggle" type="button" aria-expanded="false" aria-controls="filter-groups">
+          <span class="mobile-filter-title">Filters</span>
+          <span id="mobile-filter-summary" class="mobile-filter-summary">3/3 organization types · 7/7 hazard layers</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+        <button id="list-priority-toggle" class="list-priority-toggle" type="button" aria-pressed="false" aria-controls="map panel" aria-label="Give the information panel more screen space">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>
+          <span id="list-priority-label">More list</span>
+        </button>
+      </div>
+      <div id="filter-groups" class="filter-groups">
+        <p class="filter-hint">Tap a button to show or hide it on the map.</p>
+        <div class="filter-label">Organizations</div>
+        <div class="filters" id="type-filters" role="group" aria-label="Organization types"></div>
+        <div class="filter-label">Hazards</div>
+        <div class="filters" id="layer-filters" role="group" aria-label="Hazard layers"></div>
+      </div>
     </div>
     <button id="impact-bar" class="impact-bar" hidden aria-label="View all affected organizations"></button>
     <button id="watch-bar" class="impact-bar watch" hidden aria-label="View watchlist organizations"></button>
@@ -150,9 +163,10 @@
 
 <dialog id="about">
   <div class="about-inner">
+    <button id="about-close-top" class="dialog-close" type="button" aria-label="Close information panel">&times;</button>
     <h2>Cultural Heritage Resilience</h2>
     <p class="about-note">This project may be downloaded from <a href="https://github.com/FreshPremise/Cultural-Heritage-Resilience-Crisis-Map" target="_blank" rel="noopener">GitHub</a>.</p>
-    <p class="about-build">Build 2026.08.06.2 · Released August 6, 2026</p>
+    <p class="about-build">Build 2026.08.28.1 · Released August 28, 2026</p>
     <p class="about-prototype"><b>Prototype:</b> This map shows a non-exhaustive sample of cultural heritage organizations across North America and should not be treated as a complete directory.</p>
     <p class="about-lede">This is an interactive live crisis map for North American cultural heritage organizations showing hazards that threaten libraries, museums, and archives. A representative sample of these organizations is plotted across North America alongside storms, floods, wildfires, earthquakes, heat and cold, and air-quality alerts.</p>
     <h3>How to read the map</h3>
@@ -168,7 +182,7 @@
       <div class="about-guide-row">
         <span class="about-guide-symbol" id="about-hazard-symbol" aria-hidden="true"></span>
         <div>
-          <p><b>Hazard markers.</b> Their icons and colors match the controls on the right. Larger markers mean more severe events. Click one for details.</p>
+          <p><b>Hazard markers.</b> Their icons and colors match the filter controls. Larger markers mean more severe events. Click one for details.</p>
           <div class="about-hazard-icons" id="about-hazard-icons" aria-label="Hazard marker icons"></div>
         </div>
       </div>
@@ -210,6 +224,7 @@
 
 <dialog id="select-overlay">
   <div class="about-inner">
+    <button id="select-close-top" class="dialog-close" type="button" aria-label="Close Select overlay">&times;</button>
     <h2>Select overlay</h2>
     <p class="about-lede">Upload a spreadsheet with organizations that you wish to see on the map. They will be plotted alongside the public dataset, matched against live hazards, and included in every export, brief, and outreach draft.</p>
     <p class="about-note" style="margin-top:10px">The file is read in your browser and saved only to this browser's local storage. The assistant cannot access it by default. If you explicitly enable private-list sharing in Assistant settings, relevant records may be sent to the AI provider you selected.</p>
@@ -231,6 +246,7 @@ Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://exampl
 
 <dialog id="outreach">
   <div class="about-inner">
+    <button id="outreach-close-top" class="dialog-close" type="button" aria-label="Close outreach draft">&times;</button>
     <h2 id="outreach-title">Outreach draft</h2>
     <textarea id="outreach-text" rows="14" spellcheck="false" aria-label="Outreach email draft"></textarea>
     <p class="about-note">Generated from live monitoring data — review, personalize, and send from your own email client. Nothing is sent from this tool. Tip: paste it into the assistant to adjust tone or add specifics.</p>
@@ -241,14 +257,14 @@ Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://exampl
   </div>
 </dialog>
 
-<script src="vendor/maplibre-gl/maplibre-gl.js?v=27"></script>
+<script src="vendor/maplibre-gl/maplibre-gl.js?v=30"></script>
 <!-- Bump ?v= after editing any of these; a plain static server sets no cache headers,
      so browsers happily serve a stale copy until forced otherwise. -->
-<script src="data/organizations.js?v=27"></script>
-<script src="data/libraries-expanded.js?v=27"></script>
-<script src="js/security.js?v=27"></script>
-<script src="js/feeds.js?v=27"></script>
-<script src="js/app.js?v=27"></script>
-<script src="js/chat.js?v=27"></script>
+<script src="data/organizations.js?v=30"></script>
+<script src="data/libraries-expanded.js?v=30"></script>
+<script src="js/security.js?v=30"></script>
+<script src="js/feeds.js?v=30"></script>
+<script src="js/app.js?v=30"></script>
+<script src="js/chat.js?v=30"></script>
 </body>
 </html>

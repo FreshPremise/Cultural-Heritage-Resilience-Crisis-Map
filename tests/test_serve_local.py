@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import threading
 import unittest
 import urllib.error
@@ -42,11 +43,13 @@ class RestrictedServerTests(unittest.TestCase):
             )
             self.assertEqual(response.headers["Pragma"], "no-cache")
             self.assertEqual(response.headers["Expires"], "0")
+            self.assertIsNone(response.headers.get("Clear-Site-Data"))
 
     def test_version_manifest_is_served_without_caching(self):
         with self.opener.open(self.base + "/version.json", timeout=3) as response:
             body = response.read().decode("utf-8")
-            self.assertIn('"build": "2026.08.06.2"', body)
+            expected = json.loads((ROOT / "version.json").read_text(encoding="utf-8"))
+            self.assertEqual(json.loads(body), expected)
             self.assertEqual(
                 response.headers["Cache-Control"],
                 "no-store, no-cache, max-age=0, must-revalidate",
@@ -60,7 +63,10 @@ class RestrictedServerTests(unittest.TestCase):
             self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
     def test_repository_and_traversal_paths_are_not_served(self):
-        for path in ("/SECURITY.md", "/README.md", "/scripts/serve_local.py", "/js/../SECURITY.md"):
+        for path in (
+            "/SECURITY.md", "/README.md", "/scripts/serve_local.py", "/js/../SECURITY.md",
+            "/deployment/firebase.json", "/scripts/prepare_firebase.mjs",
+        ):
             with self.subTest(path=path):
                 with self.assertRaises(urllib.error.HTTPError) as raised:
                     self.opener.open(self.base + path, timeout=3)
@@ -68,7 +74,8 @@ class RestrictedServerTests(unittest.TestCase):
                 raised.exception.close()
 
     def test_mutating_methods_are_rejected(self):
-        request = urllib.request.Request(self.base + "/", data=b"test", method="POST")
+        # Test method rejection without an unread request body racing Windows socket teardown.
+        request = urllib.request.Request(self.base + "/", data=b"", method="POST")
         with self.assertRaises(urllib.error.HTTPError) as raised:
             self.opener.open(request, timeout=3)
         self.assertEqual(raised.exception.code, 405)
