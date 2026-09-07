@@ -1,8 +1,8 @@
 # Privacy
 
-Cultural Heritage Resilience is a static browser application. It has no application
-server, user accounts, analytics, advertising, or tracking cookies. Hosting providers
-may retain ordinary access logs under their own policies.
+Cultural Heritage Resilience is a static browser application designed to run locally.
+The included loopback server serves files only to the same computer. The application has
+no user accounts, analytics, advertising, or tracking cookies.
 
 ## Data the browser contacts
 

@@ -14,9 +14,9 @@ wildfires, earthquakes, heat and cold, and air-quality alerts.
 
 - Displays 2,583 libraries, museums, and archives across the United States, Canada,
   and Mexico.
-- Loads current weather alerts, earthquakes, wildfire incidents and perimeters, and
+- Loads current weather alerts, earthquakes, wildfire incidents and satellite-derived perimeter estimates, and
   other natural events from public sources.
-- Matches organizations to hazards by published boundary, official warned-zone outline, or distance.
+- Matches organizations to hazards by published boundary, official warned-zone outline, county approximation, or project-estimated radius.
 - Lists affected organizations and ranks events that may require attention.
 - Searches organizations by name, city, or state or province.
 - Exports affected-organization lists as CSV files.
@@ -26,10 +26,9 @@ wildfires, earthquakes, heat and cold, and air-quality alerts.
 
 ## Running it
 
-Running the project locally lets you view and test the map on your own computer before
-it is published to a website. The project is a static site, so there is no application
-installer, build step, server framework, or package installation. You only need a modern
-web browser and Python 3.
+The application is designed to be downloaded and run locally. It is a static site, so
+there is no application installer, build step, server framework, or package installation.
+You only need a modern web browser and Python 3.
 
 1. Download the repository from GitHub and extract it, or clone it with Git.
 2. Open a terminal or PowerShell window in the project folder.
@@ -44,16 +43,13 @@ web browser and Python 3.
 4. Open <http://127.0.0.1:8000> in your browser.
 5. When you are finished, return to the terminal and press **Ctrl+C** to stop the server.
 
-**Windows alternative:** Instead of following steps 3–5 above, run
-`Start-Cultural-Heritage-Resilience.ps1` from the project folder. It automatically
-selects an available loopback port, starts the restricted server, and opens the
-application in your browser. The server exposes only the files needed to run the
-application and adds browser security protections that also apply to hosted deployments.
+**Windows alternative:** Instead of following steps 3-5 above, run
+`Launch-Cultural-Heritage-Resilience.ps1` from the project folder. It starts one
+foreground Python process, binds a new restricted loopback server, and opens only the
+port that process owns. Keep its terminal window open while using the map, then press
+**Ctrl+C** to stop it. The launcher never probes or reuses an existing local web server.
 
-The local server is recommended because browsers may restrict live data requests when
-`index.html` is opened directly from disk. Opening that file directly works in many
-browsers, but if the map cannot load its live sources, use the local server instructions
-above.
+Opening `index.html` directly is not supported. Use one of the local server options above.
 
 ## Phone and tablet use
 
@@ -72,39 +68,49 @@ its profile, website, and current hazards.
 
 **Hazards:** Public feeds are refreshed approximately every five minutes.
 
-| Feed | Coverage | What it provides |
-|------|----------|------------------|
-| [NWS alerts](https://www.weather.gov/documentation/services-web-api) | United States | Watches, warnings, advisories with polygons or county codes |
-| [Environment Canada](https://api.weather.gc.ca) | Canada | Weather alerts with polygons |
-| [USGS](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php) | All of North America | Earthquakes M3+ |
-| [NIFC WFIGS](https://data-nifc.opendata.arcgis.com) | United States | Active wildfire incidents |
-| [CWFIS](https://cwfis.cfs.nrcan.gc.ca) | Canada | Active wildfire perimeters |
-| [NASA EONET](https://eonet.gsfc.nasa.gov) | Continent-wide | Storms, volcanoes, and events beyond the US feeds (Canada, Mexico, offshore) |
+| Feed | Coverage | Selection used by this project |
+|------|----------|--------------------------------|
+| [NWS alerts](https://www.weather.gov/documentation/services-web-api) | United States | Actual watches, warnings, and advisories rated Moderate, Severe, or Extreme; selected test, marine, surf, beach, rip-current, lakeshore, and low-water alerts are excluded |
+| [Environment Canada](https://api.weather.gc.ca) | Canada | Active watches and warnings plus orange- or red-risk alerts; ended and cancelled alerts are excluded |
+| [USGS](https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php) | North America | Earthquakes of magnitude 3.0 or greater from the weekly feed |
+| [NIFC WFIGS](https://data-nifc.opendata.arcgis.com) | United States | Active wildfire incidents of at least 100 acres |
+| [CWFIS](https://cwfis.cfs.nrcan.gc.ca) | Canada | Satellite-derived FireM3 perimeter estimates larger than 500 hectares; these are not operational incident perimeters |
+| [NASA EONET](https://eonet.gsfc.nasa.gov) | North America | Selected open wildfires, severe storms, volcanoes, and floods, with overlapping US and Canadian events excluded |
 
-RainViewer supplies the optional precipitation-radar overlay. When a source temporarily
-fails, the interface marks it stale and retains its last successful response for up to
-one hour. Expired alerts are removed from retained responses.
+RainViewer supplies the optional precipitation-radar overlay; a radar frame more than 30
+minutes old is labeled stale. When a hazard source temporarily fails, the interface marks
+it stale and retains its last successful response for up to one hour. Expired alerts are
+removed from retained responses. The 24-hour impact trend records complete refreshes for
+the public demonstration dataset only, so private lists and view filters do not change its
+scope.
 
-Toggle hazard layers and organization types with the filter chips. Click an event for its
+Toggle hazard layers and organization types with the filter chips. Select an event for its
 detail: affected-organization list (each row jumps to that institution), full official
 text, severity, timing, and a link to the authoritative source or news report.
 
+These thresholds reduce noise but limit coverage. An event or organization that is not
+shown may still require attention. See [Data sources and methodology](DATA_SOURCES.md) for
+the complete selection rules, project screening-priority thresholds, and match methods.
+
 ## How impact matching works
 
-Each organization is checked against each event using the most precise method available:
+Each organization is checked against each event using the most precise available method:
 
-1. **Polygon** — storm-based warnings (tornado, severe thunderstorm, flash flood) and all
-   Canadian alerts include a shape; organizations are matched by point-in-polygon.
-2. **Warned-zone outline** — ~90% of US alerts (heat, winter, fire weather, air quality,
-   flood watches) carry no polygon, only county FIPS codes, and a county is often far
-   larger than the warned zone: a fire weather watch for one mountain slope lists every
-   county the zone touches. Organizations are matched by county first (every US
-   organization has been reverse-geocoded to its county, see `scripts/`), and the app then
-   fetches the alert's official zone outlines from api.weather.gov, caches them in the
-   browser, and re-matches by point-in-polygon. Until the outlines arrive, the match is
-   labeled "county-level" in the panel and popups.
-3. **Radius** — point events (earthquakes, wildfire incidents, EONET points) match
-   organizations within a severity-scaled radius.
+1. **Published polygon:** organizations are matched by point-in-polygon when a source
+   publishes a usable event boundary.
+2. **Official warned zone:** for NWS alerts without a polygon, the app fetches the alert's
+   official warned-zone outlines and re-matches organizations by point-in-polygon. These
+   requests are scheduled only by matches in the public demonstration dataset, so a
+   private-only match cannot change outbound traffic.
+3. **County approximation:** while an NWS warned-zone outline is unavailable, county-coded
+   alerts use an explicitly labeled county-level approximation.
+4. **Estimated radius:** point events such as earthquakes, wildfire incidents, and EONET
+   events use a project-estimated screening radius. It is not an official impact,
+   evacuation, or damage boundary.
+
+The application preserves provider severity when it is available and uses a separate
+**Project screening priority** to compare events from different sources. The project label
+is a screening aid, not an official provider rating.
 
 Events affecting mapped organizations appear first. Severity and the number of affected
 organizations determine the order within that group.
@@ -135,10 +141,11 @@ Anthropic Claude and OpenAI-compatible endpoints.
 
 How it stays safe:
 
-- **API keys:** The key stays in page memory and is cleared when the page reloads or closes.
-  Use a restricted, spend-limited key.
+- **API keys:** A key stays in page memory only for the selected provider and endpoint. It
+  is cleared when that recipient changes and when the page reloads or closes. Use a
+  restricted, spend-limited key.
 - **Private overlays:** Assistant access to an uploaded list requires explicit permission
-  for the current page session.
+  for each selected provider and endpoint in the current page session.
 - **Available actions:** Assistant tools search loaded data, change filters, focus the map,
   and open affected-organization views.
 - **Public feed text:** Event descriptions are handled as untrusted data.
@@ -170,10 +177,10 @@ js/app.js             map, impact matching, panel, popups, search, filters, them
 js/security.js        shared URL, CSV, and assistant privacy guards
 js/chat.js            optional assistant panel: BYO-key LLM + tool-calling over window.HW
 tests/                dependency-free Node tests plus local-server Python tests
-deployment/firebase.json version-controlled Firebase Hosting configuration
 vendor/maplibre-gl/   pinned MapLibre GL JS runtime, license, and integrity manifest
 scripts/serve_local.py restricted loopback-only development server
-scripts/prepare_firebase.mjs prepares an allowlisted Firebase package without publishing
+scripts/launch_local.py owns the local server socket and opens its exact browser URL
+Launch-Cultural-Heritage-Resilience.ps1 minimal Windows wrapper for the Python launcher
 scripts/              data conversion, validation, and county-FIPS build tools
 ```
 
@@ -192,32 +199,10 @@ node --check js/security.js
 node --check js/feeds.js
 node --check js/app.js
 node --check js/chat.js
-python -B -m unittest tests/test_serve_local.py
+python -B -m unittest tests/test_serve_local.py tests/test_launch_local.py
 node scripts/check_vendor_integrity.mjs
 node scripts/check_sensitive_files.mjs
 ```
-
-## Preparing a Firebase package
-
-With Node.js 22 or later, run this from the project folder, choosing an output directory
-that does not already exist:
-
-```bash
-node scripts/prepare_firebase.mjs outputs/firebase-release
-```
-
-The script copies only the 15 allowlisted runtime files into `public` and places the
-version-controlled [Firebase configuration](deployment/firebase.json) beside that
-directory. It refuses to overwrite an existing package. Tests, Python caches, private
-lists, internal notes, and Git metadata are not included. This command does not upload
-or deploy anything, and does not include credentials or select a Firebase project.
-
-Use the generated package for a separately authorized Firebase deployment. Keep
-`firebase.json` beside `public`, not inside it, and do not publish the repository root.
-The configuration retains the security headers and fresh HTML/version responses without
-clearing the browser's entire site cache. Versioned asset URLs identify each release.
-See Firebase's [Hosting configuration](https://firebase.google.com/docs/hosting/full-config)
-and [cache behavior](https://firebase.google.com/docs/hosting/manage-cache) documentation.
 
 ## Possible future directions
 

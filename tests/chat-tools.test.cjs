@@ -20,6 +20,12 @@ function facadeMethodSource(name) {
   return match[0];
 }
 
+function chatFunctionSource(name) {
+  const match = chat.match(new RegExp(`  function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}`));
+  assert.ok(match, `missing chat function ${name}`);
+  return match[0];
+}
+
 function createHarness() {
   const catalogStart = chat.indexOf("var TOOLS = [");
   const catalogEnd = chat.indexOf("/* ---------------- system prompt", catalogStart);
@@ -92,4 +98,54 @@ test("set_hazard_layers dispatch restores every layer from the advertised full l
   const actual = Object.keys(context.LAYER_GROUPS).sort();
   assert.deepEqual(Array.from(result.activeLayers).sort(), actual);
   for (const group of actual) assert.equal(context.state.layerOn[group], true, group);
+});
+
+test("focus_organization gives the same result for unknown and unconsented private ids", () => {
+  const calls = [];
+  const context = {
+    window: {},
+    orgById: {
+      public: { id: "public", lat: 40, lon: -75 },
+      private: { id: "private", lat: 41, lon: -76, selected: true },
+    },
+    prepareMapForNavigation() { calls.push("prepare"); },
+    pointFramePadding() { return 0; },
+    showOrgPopup(id) { calls.push(`popup:${id}`); },
+    orgSummary(org) { return { id: org.id }; },
+    map: {
+      getZoom() { return 3; },
+      easeTo(options) { calls.push(`map:${options.center.join(",")}`); },
+    },
+  };
+  vm.runInNewContext(`window.HW = { ${facadeMethodSource("focusOrganization")} };`, context);
+
+  const missing = JSON.parse(JSON.stringify(context.window.HW.focusOrganization("missing", {})));
+  const hidden = JSON.parse(JSON.stringify(context.window.HW.focusOrganization("private", {})));
+  assert.deepEqual(hidden, missing);
+  assert.deepEqual(calls, [], "denied lookups must not cause map side effects");
+
+  const publicResult = JSON.parse(JSON.stringify(context.window.HW.focusOrganization("public", {})));
+  assert.deepEqual(publicResult, { ok: true, focused: { id: "public" } });
+  assert.deepEqual(calls, ["prepare", "map:-75,40", "popup:public"]);
+});
+
+test("authority invalidation aborts the active request and rejects the stale turn", () => {
+  const context = {
+    authorityEpoch: 0,
+    apiMessages: [{ role: "user", content: "test" }],
+    activeAbortController: { abort() { context.aborted = true; } },
+    aborted: false,
+  };
+  vm.runInNewContext(
+    `${chatFunctionSource("invalidateAuthority")}\n${chatFunctionSource("assertTurnActive")}`,
+    context
+  );
+
+  assert.doesNotThrow(() => context.assertTurnActive({ epoch: 0 }));
+  context.invalidateAuthority();
+  assert.equal(context.aborted, true);
+  assert.equal(context.authorityEpoch, 1);
+  assert.deepEqual(Array.from(context.apiMessages), []);
+  assert.throws(() => context.assertTurnActive({ epoch: 0 }), /settings or private-list access changed/);
+  assert.doesNotThrow(() => context.assertTurnActive({ epoch: 1 }));
 });

@@ -1,6 +1,6 @@
 // Curated demonstration dataset of North American cultural heritage organizations.
 // Coordinates are approximate (institution or city level) and intended for regional
-// situational awareness, not navigation. A production deployment would replace this
+// situational awareness, not navigation. A larger installation could replace this
 // with the full IMLS Museum Data Files and Public Libraries Survey (US), plus
 // national datasets for Canada and Mexico. url is null where not confidently known.
 window.ORGANIZATIONS = [

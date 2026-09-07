@@ -32,6 +32,7 @@ tmp/
 outputs/
 
 # Internal project handoffs and local tooling (not for public sharing)
+/scripts/audit_match_accuracy.mjs
 HANDOFF.md
 CONTINUING-WITH-CODEX.md
 NEXT-CHAT-HANDOFF.md

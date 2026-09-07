@@ -23,12 +23,21 @@ jobs:
           node --check js/chat.js
           node --check scripts/check_sensitive_files.mjs
           node --check scripts/check_vendor_integrity.mjs
-          node --check scripts/prepare_firebase.mjs
       - name: Run tests
         run: node --test "tests/*.test.cjs"
       - name: Test the restricted local server
-        run: python -B -m unittest tests/test_serve_local.py
+        run: python -B -m unittest tests/test_serve_local.py tests/test_launch_local.py
       - name: Scan for accidentally included credentials
         run: node scripts/check_sensitive_files.mjs
       - name: Verify vendored dependency integrity
         run: node scripts/check_vendor_integrity.mjs
+
+  launcher-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check PowerShell wrapper syntax
+        shell: pwsh
+        run: '[void][scriptblock]::Create((Get-Content -Raw "Launch-Cultural-Heritage-Resilience.ps1"))'
+      - name: Test restricted server and owned-port launcher
+        run: python -B -m unittest tests/test_serve_local.py tests/test_launch_local.py

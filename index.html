@@ -3,41 +3,44 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="application-version" content="2026.08.28.1">
+<meta name="application-version" content="2026.09.07.1">
 <title>Cultural Heritage Resilience — crisis monitor for cultural heritage</title>
 <meta name="description" content="Live situational awareness for libraries, museums, and archives across North America.">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tiles.openfreemap.org https://tilecache.rainviewer.com https://*.tilecache.rainviewer.com; font-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; worker-src 'self' blob:; child-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='4.7' y='4.7' width='6.6' height='6.6' transform='rotate(45 8 8)' fill='%238C2F24'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=30">
-<link rel="stylesheet" href="styles.css?v=30">
+<link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css?v=31">
+<link rel="stylesheet" href="styles.css?v=31">
 </head>
 <body>
 <header id="topbar">
   <div class="brand">
     <span class="brand-mark" aria-hidden="true"></span>
     <div class="brand-text">
-      <span class="brand-title"><span class="brand-name">Cultural Heritage Resilience</span><span class="beta-badge">Beta</span></span>
+      <h1 class="brand-title"><span class="brand-name">Cultural Heritage Resilience</span><span class="beta-badge">Beta</span></h1>
       <span class="brand-sub">North American crisis monitor</span>
     </div>
   </div>
   <div class="stats" id="stats" aria-live="polite"></div>
   <div class="search" id="search-wrap">
     <svg class="search-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
-    <input id="search" type="search" placeholder="Search institution, city, or state…" autocomplete="off" spellcheck="false" aria-label="Search by institution name, city, or state">
-    <div id="search-results" role="listbox" hidden></div>
+    <input id="search" type="search" placeholder="Search institution, city, or state…" autocomplete="off" spellcheck="false" aria-label="Search by institution name, city, or state" role="combobox" aria-autocomplete="list" aria-controls="search-results" aria-expanded="false" aria-describedby="search-status">
+    <div id="search-results" role="listbox" aria-label="Organization search results" hidden></div>
+    <span id="search-status" class="sr-only" role="status" aria-live="polite"></span>
   </div>
   <div class="header-actions">
     <span class="feed-label">Live feeds</span>
-    <div id="feed-status" title="Live data feed health — one dot per source. Green means loaded, amber means cached data is stale, and red means unavailable; hover a dot for details." aria-label="Live data feed health, one dot per source"></div>
+    <div id="feed-status" role="status" aria-live="polite" aria-atomic="true" title="Live data feed health — one dot per source. Green means loaded, amber means cached data is stale, and red means unavailable; hover a dot for details." aria-label="Live data feed health, one dot per source"></div>
     <button id="refresh-btn" class="icon-btn" title="Refresh feeds" aria-label="Refresh feeds">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      <span id="feed-summary-indicator" class="dot feed-summary-indicator pending" aria-hidden="true"></span>
     </button>
-    <button id="asst-launch" class="icon-btn" title="Open assistant" aria-label="Open assistant">
+    <button id="asst-launch" class="icon-btn" title="Open assistant" aria-label="Open assistant" aria-controls="assistant" aria-expanded="false">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>
     <button id="radar-btn" class="icon-btn" title="Weather radar — live precipitation" aria-label="Toggle weather radar" aria-pressed="true">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.5 15a4.5 4.5 0 1 0-1.4-8.78A6 6 0 1 0 6.5 15"/><path d="M8 17.5v2M12 18.5v2.5M16 17.5v2"/></svg>
+      <span id="radar-status-label" class="radar-status-label" aria-hidden="true">Loading</span>
     </button>
     <button id="select-btn" class="icon-btn" title="Select overlay: track your own list of organizations" aria-label="Select overlay">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -59,16 +62,17 @@
   <span>A newer version of the map is available.</span>
   <button id="update-reload" type="button">Reload update</button>
 </div>
+<div id="feed-warning" class="feed-warning" role="status" aria-live="polite" hidden></div>
 
 <main id="app-main">
-  <aside id="assistant" class="collapsed" aria-label="AI assistant">
+  <aside id="assistant" class="collapsed" aria-labelledby="assistant-title" aria-hidden="true">
     <div class="asst-head">
-      <span class="asst-title">Assistant <span class="asst-experimental">Experimental</span></span>
+      <span class="asst-title" id="assistant-title">Assistant <span class="asst-experimental">Experimental</span></span>
       <span class="asst-badge" id="asst-badge">Not configured</span>
-      <button id="asst-settings-btn" class="asst-icon" title="Assistant settings" aria-label="Assistant settings">
+      <button id="asst-settings-btn" class="asst-icon" title="Assistant settings" aria-label="Assistant settings" aria-controls="asst-settings" aria-expanded="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
-      <button id="asst-collapse" class="asst-icon" title="Collapse assistant" aria-label="Collapse assistant">
+      <button id="asst-collapse" class="asst-icon" title="Collapse assistant" aria-label="Collapse assistant" aria-controls="assistant">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 18l-6-6 6-6"/></svg>
       </button>
     </div>
@@ -155,18 +159,18 @@
       <span id="updated"></span>
       <span id="trend" aria-hidden="true"></span>
     </div>
-    <div id="event-list" class="event-list" role="list"></div>
+    <ul id="event-list" class="event-list"></ul>
     <div id="event-detail" class="event-detail" hidden></div>
     <div id="affected-view" class="event-detail" hidden></div>
   </aside>
 </main>
 
-<dialog id="about">
+<dialog id="about" aria-labelledby="about-title">
   <div class="about-inner">
     <button id="about-close-top" class="dialog-close" type="button" aria-label="Close information panel">&times;</button>
-    <h2>Cultural Heritage Resilience</h2>
+    <h2 id="about-title">Cultural Heritage Resilience</h2>
     <p class="about-note">This project may be downloaded from <a href="https://github.com/FreshPremise/Cultural-Heritage-Resilience-Crisis-Map" target="_blank" rel="noopener">GitHub</a>.</p>
-    <p class="about-build">Build 2026.08.28.1 · Released August 28, 2026</p>
+    <p class="about-build">Build 2026.09.07.1 · Released September 7, 2026</p>
     <p class="about-prototype"><b>Prototype:</b> This map shows a non-exhaustive sample of cultural heritage organizations across North America and should not be treated as a complete directory.</p>
     <p class="about-lede">This is an interactive live crisis map for North American cultural heritage organizations showing hazards that threaten libraries, museums, and archives. A representative sample of these organizations is plotted across North America alongside storms, floods, wildfires, earthquakes, heat and cold, and air-quality alerts.</p>
     <h3>How to read the map</h3>
@@ -188,7 +192,7 @@
       </div>
       <div class="about-guide-row">
         <span class="about-guide-symbol guide-hazard-area" aria-hidden="true"></span>
-        <p><b>Shaded areas.</b> These show official hazard boundaries when the source publishes one.</p>
+        <p><b>Shaded areas.</b> Solid shaded areas show a boundary published by the source or an official NWS warned zone. Dashed circles show a project-estimated screening radius around a point event, not an official impact boundary.</p>
       </div>
       <div class="about-guide-row">
         <span class="about-guide-symbol guide-affected-dot" aria-hidden="true"></span>
@@ -198,14 +202,23 @@
     <p class="about-note">Some weather alerts list entire counties instead of publishing a map shape. The app matches organizations by county right away, then loads the alert's official warned-zone outline and re-checks each organization against it, so a valley library is not flagged by a watch that only covers the mountains. Until the outline loads, those matches are labeled "county-level" in the panel.</p>
     <h3>Live data sources</h3>
     <ul class="about-feeds">
-      <li><a href="https://www.weather.gov/documentation/services-web-api" target="_blank" rel="noopener">National Weather Service alerts</a> — US watches and warnings, refreshed continuously</li>
+      <li><a href="https://www.weather.gov/documentation/services-web-api" target="_blank" rel="noopener">National Weather Service alerts</a> — US watches, warnings, and advisories, refreshed approximately every five minutes</li>
       <li><a href="https://api.weather.gc.ca" target="_blank" rel="noopener">Environment and Climate Change Canada</a> — Canadian weather alerts</li>
       <li><a href="https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php" target="_blank" rel="noopener">USGS</a> — earthquakes, all of North America</li>
       <li><a href="https://data-nifc.opendata.arcgis.com" target="_blank" rel="noopener">NIFC WFIGS</a> — active US wildfire incidents</li>
-      <li><a href="https://cwfis.cfs.nrcan.gc.ca" target="_blank" rel="noopener">Natural Resources Canada CWFIS</a> — active Canadian wildfire perimeters</li>
+      <li><a href="https://cwfis.cfs.nrcan.gc.ca" target="_blank" rel="noopener">Natural Resources Canada CWFIS</a> — satellite-derived Canadian wildfire perimeter estimates</li>
       <li><a href="https://eonet.gsfc.nasa.gov" target="_blank" rel="noopener">NASA EONET</a> — continent-wide natural events, including Canada and Mexico</li>
       <li><a href="https://www.rainviewer.com/api.html" target="_blank" rel="noopener">RainViewer</a> — optional precipitation-radar tiles</li>
     </ul>
+    <h3>Coverage and selection limits</h3>
+    <ul class="about-feeds">
+      <li>NWS alerts must be rated Moderate, Severe, or Extreme. Test, marine, surf, beach, rip-current, lakeshore, and low-water alerts are excluded.</li>
+      <li>Environment Canada results include active watches and warnings plus orange- or red-risk alerts; ended and cancelled alerts are excluded.</li>
+      <li>USGS earthquakes must be magnitude 3.0 or greater and within the project’s North America bounds.</li>
+      <li>WFIGS includes active US wildfire incidents of at least 100 acres. CWFIS includes satellite-derived Canadian FireM3 perimeter estimates larger than 500 hectares; these are not operational incident perimeters.</li>
+      <li>NASA EONET supplies selected open wildfires, severe storms, volcanoes, and floods while overlapping US and Canadian events are excluded.</li>
+    </ul>
+    <p class="about-note">These filters reduce noise but also limit coverage. An event or organization that is not shown may still require attention. Event details identify whether matching uses a published boundary, an official zone, a county approximation, or an estimated radius.</p>
     <h3>About the organization data</h3>
     <p>This beta monitors 2,583 institutions: a curated North American demonstration set plus 1,000 public libraries from the IMLS Public Libraries Survey and 1,000 academic libraries from NCES IPEDS. Public-library markers use central-outlet coordinates; academic-library markers use the reporting institution’s main-campus coordinates. You can also overlay your own list privately in this browser.</p>
     <ul class="about-feeds">
@@ -222,10 +235,10 @@
   </div>
 </dialog>
 
-<dialog id="select-overlay">
+<dialog id="select-overlay" aria-labelledby="select-overlay-title">
   <div class="about-inner">
     <button id="select-close-top" class="dialog-close" type="button" aria-label="Close Select overlay">&times;</button>
-    <h2>Select overlay</h2>
+    <h2 id="select-overlay-title">Select overlay</h2>
     <p class="about-lede">Upload a spreadsheet with organizations that you wish to see on the map. They will be plotted alongside the public dataset, matched against live hazards, and included in every export, brief, and outreach draft.</p>
     <p class="about-note" style="margin-top:10px">The file is read in your browser and saved only to this browser's local storage. The assistant cannot access it by default. If you explicitly enable private-list sharing in Assistant settings, relevant records may be sent to the AI provider you selected.</p>
     <h3>Spreadsheet format</h3>
@@ -244,7 +257,7 @@ Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://exampl
   </div>
 </dialog>
 
-<dialog id="outreach">
+<dialog id="outreach" aria-labelledby="outreach-title">
   <div class="about-inner">
     <button id="outreach-close-top" class="dialog-close" type="button" aria-label="Close outreach draft">&times;</button>
     <h2 id="outreach-title">Outreach draft</h2>
@@ -257,14 +270,14 @@ Example Public Library,library,Springfield,IL,US,39.8017,-89.6437,https://exampl
   </div>
 </dialog>
 
-<script src="vendor/maplibre-gl/maplibre-gl.js?v=30"></script>
+<script src="vendor/maplibre-gl/maplibre-gl.js?v=31"></script>
 <!-- Bump ?v= after editing any of these; a plain static server sets no cache headers,
      so browsers happily serve a stale copy until forced otherwise. -->
-<script src="data/organizations.js?v=30"></script>
-<script src="data/libraries-expanded.js?v=30"></script>
-<script src="js/security.js?v=30"></script>
-<script src="js/feeds.js?v=30"></script>
-<script src="js/app.js?v=30"></script>
-<script src="js/chat.js?v=30"></script>
+<script src="data/organizations.js?v=31"></script>
+<script src="data/libraries-expanded.js?v=31"></script>
+<script src="js/security.js?v=31"></script>
+<script src="js/feeds.js?v=31"></script>
+<script src="js/app.js?v=31"></script>
+<script src="js/chat.js?v=31"></script>
 </body>
 </html>

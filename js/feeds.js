@@ -1,7 +1,8 @@
 /* Heritage Watch — live hazard feed fetchers and normalizers.
-   Every fetcher returns an array of normalized events:
-   { id, feed, category, title, area, severity 1-4, sevLabel, time, expires,
-     description, link {href,label}|null, source, geometry|null, point|null, radiusKm|null }
+   Every fetcher returns an array of normalized events. Canonical fields include
+   screeningPriority, screeningPriorityLabel, providerSeverity, responseClass,
+   matchMethod, startedAt, observedAt, updatedAt, and expiresAt. The legacy
+   severity, sevLabel, time, and expires aliases remain while callers migrate.
    All fetchers are defensive: a failed or malformed feed reports failure and
    never takes the app down. */
 
@@ -11,6 +12,14 @@
   const SEV_LABELS = { 4: "Extreme", 3: "Severe", 2: "Moderate", 1: "Minor" };
   const MAX_JSON_BYTES = 64 * 1024 * 1024;
   const MAX_SOURCE_FEATURES = 5000;
+  const MAX_GEOMETRY_VERTICES = 100000;
+  const MAX_RING_VERTICES = 50000;
+  const MAX_GEOMETRY_RINGS = 2000;
+  const MAX_GEOMETRY_POLYGONS = 500;
+  const MAX_NWS_ZONE_URLS = 80;
+  const MAX_WFIGS_ACRES = 100000000;
+  const RESPONSE_CLASSES = new Set(["watch", "warning", "advisory", "observed-event", "unknown"]);
+  const MATCH_METHODS = new Set(["published-polygon", "official-zone", "county-approximate", "estimated-radius", "unknown"]);
 
   async function readResponseText(response, maxBytes) {
     const declared = Number(response.headers && response.headers.get("content-length"));
@@ -61,19 +70,64 @@
     return data.features;
   }
 
+  function knownTotalReached(data, loaded) {
+    var raw = data && data.numberMatched != null ? data.numberMatched : data && data.totalFeatures;
+    var total = Number(raw);
+    return Number.isFinite(total) && total >= 0 && loaded >= total;
+  }
+
+  function pointIsUsable(point) {
+    return Array.isArray(point) && point.length >= 2 &&
+      Number.isFinite(point[0]) && Number.isFinite(point[1]) &&
+      point[0] >= -180 && point[0] <= 180 && point[1] >= -90 && point[1] <= 90;
+  }
+
+  function samePosition(a, b) {
+    return pointIsUsable(a) && pointIsUsable(b) && a[0] === b[0] && a[1] === b[1];
+  }
+
   function geometryIsUsable(geometry) {
-    if (!geometry || (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") || !Array.isArray(geometry.coordinates)) return false;
-    let vertices = 0, invalid = false;
-    (function scan(value, depth) {
-      if (invalid || depth > 5 || !Array.isArray(value)) { invalid = true; return; }
-      if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") {
-        vertices++;
-        if (vertices > 500000 || !Number.isFinite(value[0]) || !Number.isFinite(value[1]) || value[0] < -180 || value[0] > 180 || value[1] < -90 || value[1] > 90) invalid = true;
-        return;
+    if (!geometry || !Array.isArray(geometry.coordinates)) return false;
+    let vertices = 0, rings = 0, polygons = 0;
+
+    function validRing(ring) {
+      if (!Array.isArray(ring) || ring.length < 4 || ring.length > MAX_RING_VERTICES) return false;
+      if (++rings > MAX_GEOMETRY_RINGS || !samePosition(ring[0], ring[ring.length - 1])) return false;
+      const distinct = new Set();
+      for (let i = 0; i < ring.length; i++) {
+        if (!pointIsUsable(ring[i]) || ++vertices > MAX_GEOMETRY_VERTICES) return false;
+        if (i < ring.length - 1) distinct.add(ring[i][0] + "," + ring[i][1]);
       }
-      value.forEach(function (child) { scan(child, depth + 1); });
-    })(geometry.coordinates, 0);
-    return !invalid && vertices >= 4;
+      return distinct.size >= 3;
+    }
+
+    function validPolygon(polygon) {
+      if (!Array.isArray(polygon) || !polygon.length || ++polygons > MAX_GEOMETRY_POLYGONS) return false;
+      for (let i = 0; i < polygon.length; i++) if (!validRing(polygon[i])) return false;
+      return true;
+    }
+
+    if (geometry.type === "Polygon") return validPolygon(geometry.coordinates);
+    if (geometry.type !== "MultiPolygon" || !geometry.coordinates.length) return false;
+    for (let i = 0; i < geometry.coordinates.length; i++) {
+      if (!validPolygon(geometry.coordinates[i])) return false;
+    }
+    return true;
+  }
+
+  function geometryCenter(geometry) {
+    if (!geometryIsUsable(geometry)) return null;
+    let minLon = 180, minLat = 90, maxLon = -180, maxLat = -90;
+    const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+    polygons.forEach(function (polygon) {
+      polygon.forEach(function (ring) {
+        ring.forEach(function (point) {
+          minLon = Math.min(minLon, point[0]); maxLon = Math.max(maxLon, point[0]);
+          minLat = Math.min(minLat, point[1]); maxLat = Math.max(maxLat, point[1]);
+        });
+      });
+    });
+    return [(minLon + maxLon) / 2, (minLat + maxLat) / 2];
   }
 
   function inNorthAmerica(lon, lat) {
@@ -114,8 +168,44 @@
     return "other";
   }
 
+  function responseClass(value, fallback) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (/(^|\s)watch$/.test(normalized)) return "watch";
+    if (/(^|\s)warning$/.test(normalized)) return "warning";
+    if (/(^|\s)advisory$/.test(normalized)) return "advisory";
+    if (/(^|\s)statement$/.test(normalized)) return "observed-event";
+    return RESPONSE_CLASSES.has(fallback) ? fallback : "unknown";
+  }
+
+  function timestamp(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const parsed = new Date(value);
+    return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
+  }
+
   function mkEvent(o) {
-    o.sevLabel = SEV_LABELS[o.severity] || "Minor";
+    let priority = Number(o.screeningPriority == null ? o.severity : o.screeningPriority);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 4) priority = 1;
+    o.screeningPriority = priority;
+    o.screeningPriorityLabel = SEV_LABELS[priority];
+    o.providerSeverity = o.providerSeverity == null || o.providerSeverity === "" ? null : String(o.providerSeverity);
+    o.responseClass = RESPONSE_CLASSES.has(o.responseClass) ? o.responseClass : "unknown";
+    if (!MATCH_METHODS.has(o.matchMethod)) {
+      o.matchMethod = o.geometry ? "published-polygon" :
+        o.fips && o.fips.length ? "county-approximate" :
+          o.point && o.radiusKm ? "estimated-radius" : "unknown";
+    }
+
+    o.startedAt = timestamp(o.startedAt == null ? o.time : o.startedAt);
+    o.observedAt = timestamp(o.observedAt);
+    o.updatedAt = timestamp(o.updatedAt);
+    o.expiresAt = timestamp(o.expiresAt == null ? o.expires : o.expiresAt);
+
+    // Compatibility aliases for the existing map and assistant surfaces.
+    o.severity = o.screeningPriority;
+    o.sevLabel = o.screeningPriorityLabel;
+    o.time = o.startedAt || o.observedAt || o.updatedAt;
+    o.expires = o.expiresAt;
     o.affected = [];
     return o;
   }
@@ -153,9 +243,12 @@
       // The warned area itself is the alert's UGC zone set, one api.weather.gov URL per
       // zone in affectedZones. Kept (host-checked) so county-matched alerts can be
       // upgraded to their true zone polygons after impact matching (see app.js).
-      var zoneUrls = (Array.isArray(p.affectedZones) ? p.affectedZones : [])
-        .filter(function (u) { return typeof u === "string" && /^https:\/\/api\.weather\.gov\/zones\//.test(u); })
-        .slice(0, 80);
+      var rawZoneUrls = Array.isArray(p.affectedZones) ? p.affectedZones : [];
+      var allZoneUrls = rawZoneUrls
+        .filter(function (u) { return typeof u === "string" && /^https:\/\/api\.weather\.gov\/zones\//.test(u); });
+      var zonesTruncated = rawZoneUrls.length !== allZoneUrls.length || allZoneUrls.length > MAX_NWS_ZONE_URLS;
+      var zoneUrls = allZoneUrls.slice(0, MAX_NWS_ZONE_URLS);
+      var geometry = geometryIsUsable(f.geometry) ? f.geometry : null;
 
       out.push(
         mkEvent({
@@ -164,15 +257,20 @@
           category,
           title,
           area: clip(p.areaDesc, 140),
-          severity,
-          time: p.onset || p.effective || p.sent || null,
-          expires: p.ends || p.expires || null,
+          screeningPriority: severity,
+          providerSeverity: p.severity || null,
+          responseClass: responseClass(p.event),
+          matchMethod: geometry ? "published-polygon" : fips.length ? "county-approximate" : "unknown",
+          startedAt: p.onset || p.effective || null,
+          updatedAt: p.sent || p.effective || null,
+          expiresAt: p.ends || p.expires || null,
           description: clip([p.headline, p.description, p.instruction].filter(Boolean).join("\n\n"), 4000),
           link: p["@id"] || p.id ? { href: p["@id"] || p.id, label: "Official alert record (NWS)" } : null,
           source: p.senderName || "National Weather Service",
-          geometry: geometryIsUsable(f.geometry) ? f.geometry : null,
+          geometry,
           fips: fips.length ? fips : null,
           zones: zoneUrls.length ? zoneUrls : null,
+          zonesTruncated,
           point: null,
           radiusKm: null,
         })
@@ -193,7 +291,7 @@
       const data = await fetchJSON("https://api.weather.gc.ca/collections/weather-alerts/items?f=json&limit=" + pageSize + "&offset=" + offset);
       const page = features(data);
       allFeatures.push(...page);
-      if (page.length < pageSize || allFeatures.length >= Number(data.numberMatched || 0)) break;
+      if (page.length < pageSize || knownTotalReached(data, allFeatures.length)) break;
     }
     if (allFeatures.length >= MAX_SOURCE_FEATURES) throw new Error("ECCC result exceeds safe feature limit");
     const out = [];
@@ -214,6 +312,7 @@
 
       const category = categorize(name + " " + (p.alert_short_name_en || ""));
       const area = p.feature_name_en || p.province || "Canada";
+      const geometry = geometryIsUsable(f.geometry) ? f.geometry : null;
       // Collapse the many per-zone rows a single warning generates into one event.
       const dedupeKey = "eccc:" + p.alert_code + ":" + name + ":" + area;
       if (seen.has(dedupeKey)) continue;
@@ -226,13 +325,17 @@
           category,
           title: name.replace(/\b\w/, (c) => c.toUpperCase()) + " — " + area,
           area: clip(area + (p.province ? ", " + p.province : ""), 140),
-          severity,
-          time: p.validity_datetime || p.publication_datetime || null,
-          expires: p.event_end_datetime || p.expiration_datetime || null,
+          screeningPriority: severity,
+          providerSeverity: p.risk_colour_en || p.alert_type || null,
+          responseClass: responseClass(type, responseClass(name)),
+          matchMethod: geometry ? "published-polygon" : "unknown",
+          startedAt: p.validity_datetime || null,
+          updatedAt: p.publication_datetime || null,
+          expiresAt: p.event_end_datetime || p.expiration_datetime || null,
           description: clip(p.alert_text_en || "", 4000),
           link: { href: "https://weather.gc.ca/index_e.html?layers=alert", label: "Environment Canada warnings" },
           source: "Environment and Climate Change Canada",
-          geometry: geometryIsUsable(f.geometry) ? f.geometry : null,
+          geometry,
           point: null,
           radiusKm: null,
         })
@@ -254,10 +357,10 @@
       const p = f.properties || {};
       const c = (f.geometry || {}).coordinates || [];
       const lon = c[0], lat = c[1];
-      const mag = p.mag;
-      if (typeof lon !== "number" || typeof lat !== "number") continue;
+      const mag = Number(p.mag);
+      if (!pointIsUsable(c)) continue;
       if (!inNorthAmerica(lon, lat)) continue;
-      if (!mag || mag < 3) continue;
+      if (!Number.isFinite(mag) || mag < 3) continue;
 
       const severity = mag >= 6.5 ? 4 : mag >= 5.5 ? 3 : mag >= 4.5 ? 2 : 1;
       const radiusKm = mag >= 6.5 ? 300 : mag >= 5.5 ? 150 : mag >= 4.5 ? 70 : 30;
@@ -268,10 +371,14 @@
           category: "quake",
           title: "M" + mag.toFixed(1) + " earthquake — " + (p.place || "unknown location"),
           area: clip(p.place || "", 140),
-          severity,
-          time: p.time ? new Date(p.time).toISOString() : null,
-          expires: null,
-          description: "Magnitude " + mag.toFixed(1) + " at " + (p.place || "unknown location") + (typeof c[2] === "number" ? ", depth " + Math.round(c[2]) + " km." : "."),
+          screeningPriority: severity,
+          providerSeverity: null,
+          responseClass: "observed-event",
+          matchMethod: "estimated-radius",
+          startedAt: p.time || null,
+          updatedAt: p.updated || null,
+          expiresAt: null,
+          description: "Magnitude " + mag.toFixed(1) + " at " + (p.place || "unknown location") + (Number.isFinite(c[2]) ? ", depth " + Math.round(c[2]) + " km." : "."),
           link: p.url ? { href: p.url, label: "USGS event page" } : null,
           source: "US Geological Survey",
           geometry: null,
@@ -289,7 +396,7 @@
   async function fetchFires() {
     const base = "https://services3.arcgis.com/T4QMspbfLg3qTGWY/arcgis/rest/services/WFIGS_Incident_Locations_Current/FeatureServer/0/query";
     const common = "?where=" + encodeURIComponent("IncidentTypeCategory='WF' AND IncidentSize>=100") +
-      "&outFields=" + encodeURIComponent("IncidentName,POOState,IncidentSize,PercentContained,FireDiscoveryDateTime") +
+      "&outFields=" + encodeURIComponent("IncidentName,POOState,IncidentSize,PercentContained,FireDiscoveryDateTime,ModifiedOnDateTime_dt") +
       "&returnGeometry=true&outSR=4326&f=geojson";
     const allFeatures = [];
     const pageSize = 1000;
@@ -305,14 +412,15 @@
       const p = f.properties || {};
       const c = (f.geometry || {}).coordinates || [];
       const lon = c[0], lat = c[1];
-      if (typeof lon !== "number" || typeof lat !== "number") continue;
-      const acres = Number(p.IncidentSize) || 0;
-      if (acres < 100) continue;
+      if (!pointIsUsable(c) || !inNorthAmerica(lon, lat)) continue;
+      const acres = Number(p.IncidentSize);
+      if (!Number.isFinite(acres) || acres < 100 || acres > MAX_WFIGS_ACRES) continue;
 
       const severity = acres >= 50000 ? 4 : acres >= 10000 ? 3 : acres >= 1000 ? 2 : 1;
       const areaKm2 = acres * 0.004047;
       const radiusKm = Math.max(8, Math.sqrt(areaKm2 / Math.PI) + 8);
-      const contained = p.PercentContained == null ? null : Math.round(Number(p.PercentContained));
+      const containedValue = Number(p.PercentContained);
+      const contained = p.PercentContained == null || !Number.isFinite(containedValue) ? null : Math.max(0, Math.min(100, Math.round(containedValue)));
       const st = String(p.POOState || "").replace("US-", "");
       out.push(
         mkEvent({
@@ -321,9 +429,13 @@
           category: "fire",
           title: (p.IncidentName ? p.IncidentName + " Fire" : "Wildfire") + (st ? " — " + st : ""),
           area: st || "US",
-          severity,
-          time: p.FireDiscoveryDateTime ? new Date(p.FireDiscoveryDateTime).toISOString() : null,
-          expires: null,
+          screeningPriority: severity,
+          providerSeverity: null,
+          responseClass: "observed-event",
+          matchMethod: "estimated-radius",
+          startedAt: p.FireDiscoveryDateTime || null,
+          updatedAt: p.ModifiedOnDateTime_dt || null,
+          expiresAt: null,
           description:
             Math.round(acres).toLocaleString() + " acres" +
             (contained == null ? "" : ", " + contained + "% contained") +
@@ -354,18 +466,18 @@
       if (!category) continue;
 
       const geoms = ev.geometry || [];
+      if (!Array.isArray(geoms) || geoms.length > 10000) continue;
       const g = geoms[geoms.length - 1];
       if (!g) continue;
       let lon, lat;
       if (g.type === "Point") {
+        if (!pointIsUsable(g.coordinates)) continue;
         lon = g.coordinates[0]; lat = g.coordinates[1];
       } else if (g.type === "Polygon") {
-        const ring = g.coordinates[0] || [];
-        if (!ring.length) continue;
-        lon = ring.reduce((s, c) => s + c[0], 0) / ring.length;
-        lat = ring.reduce((s, c) => s + c[1], 0) / ring.length;
+        const center = geometryCenter(g);
+        if (!center) continue;
+        lon = center[0]; lat = center[1];
       } else continue;
-      if (typeof lon !== "number" || typeof lat !== "number") continue;
       if (!inNorthAmerica(lon, lat)) continue;
       // NWS/WFIGS cover US fires+floods and CWFIS covers Canadian fires; EONET fills the gaps
       // (Mexico, offshore storms/volcanoes) so we don't double-count.
@@ -382,9 +494,14 @@
           category,
           title: clip(ev.title, 120),
           area: category === "tropical" ? "Storm track — latest position shown" : "",
-          severity,
-          time: g.date || null,
-          expires: null,
+          screeningPriority: severity,
+          providerSeverity: null,
+          responseClass: "observed-event",
+          matchMethod: "estimated-radius",
+          startedAt: geoms[0] && geoms[0].date || null,
+          observedAt: g.date || null,
+          updatedAt: null,
+          expiresAt: null,
           description: "Tracked by NASA EONET (" + (catId || "event") + "). Position reflects the most recent observation.",
           link: src && src.url ? { href: src.url, label: "Source: " + (src.id || "event report") } : { href: "https://eonet.gsfc.nasa.gov", label: "NASA EONET" },
           source: "NASA EONET",
@@ -399,15 +516,14 @@
 
   /* ---------- 6. CWFIS active fire perimeters (Canada) ---------- */
 
-  // Natural Resources Canada's Canadian Wildland Fire Information System publishes current
-  // fire perimeters (the "M3" product) as GeoJSON with an area in hectares. We match
-  // organizations directly against the perimeter polygon, so a Canadian institution inside
-  // an active fire is flagged precisely — far more accurate than the coarse EONET points.
-  function firstCoord(geom) {
-    if (!geom) return null;
-    if (geom.type === "Polygon") { var r = geom.coordinates[0] || []; return r.length ? r[0] : null; }
-    if (geom.type === "MultiPolygon") { var m = (geom.coordinates[0] || [])[0] || []; return m.length ? m[0] : null; }
-    return null;
+  // Natural Resources Canada's FireM3 product publishes satellite-derived perimeter
+  // estimates as GeoJSON. The polygons are useful for screening, but are not operational
+  // incident perimeters and the layer does not consistently name individual fires.
+  function formatCoordinate(point) {
+    if (!pointIsUsable(point)) return "";
+    const lat = Math.abs(point[1]).toFixed(2) + "° " + (point[1] < 0 ? "S" : "N");
+    const lon = Math.abs(point[0]).toFixed(2) + "° " + (point[0] < 0 ? "W" : "E");
+    return lat + ", " + lon;
   }
 
   async function fetchCWFIS() {
@@ -420,37 +536,47 @@
       const data = await fetchJSON(url, 30000);
       const page = features(data);
       allFeatures.push(...page);
-      if (page.length < pageSize || allFeatures.length >= Number(data.numberMatched || data.totalFeatures || 0)) break;
+      if (page.length < pageSize || knownTotalReached(data, allFeatures.length)) break;
     }
     if (allFeatures.length >= MAX_SOURCE_FEATURES) throw new Error("CWFIS result exceeds safe feature limit");
     const out = [];
     for (const f of allFeatures) {
       const p = f.properties || {};
-      const ha = Number(p.area) || 0; // hectares
-      if (!geometryIsUsable(f.geometry) || ha < 500) continue;
+      const ha = Number(p.area); // hectares
+      if (!Number.isFinite(ha) || ha < 500 || !geometryIsUsable(f.geometry)) continue;
       const acres = ha * 2.47105;
       const severity = ha >= 20000 ? 4 : ha >= 5000 ? 3 : ha >= 500 ? 2 : 1;
-      const c = firstCoord(f.geometry) || [];
+      const c = geometryCenter(f.geometry);
+      if (!c || !inNorthAmerica(c[0], c[1])) continue;
+      const sourceId = clip(f.id || p.fireid || p.fire_id || "", 60);
+      const coordinate = formatCoordinate(c);
+      const observedAt = timestamp(p.lastdate);
+      const fallbackId = (p.firstdate || "unknown-date") + ":" + c[0].toFixed(3) + "," + c[1].toFixed(3) + ":" + ha.toFixed(1);
       out.push(
         mkEvent({
-          id: "cwfis:" + (p.firstdate || "") + ":" + (c[0] != null ? c[0].toFixed(3) : Math.random().toString(36).slice(2)) + "," + (c[1] != null ? c[1].toFixed(3) : ""),
+          id: "cwfis:" + (sourceId || fallbackId),
           feed: "cwfis",
           category: "fire",
-          title: "Active wildfire — Canada",
-          area: Math.round(acres).toLocaleString() + " acres burned",
-          severity,
-          time: p.firstdate || null,
-          expires: null,
+          title: "Satellite-estimated wildfire perimeter" + (sourceId ? " " + sourceId : "") + " near " + coordinate,
+          area: "About " + Math.round(acres).toLocaleString() + " acres in mapped estimate",
+          screeningPriority: severity,
+          providerSeverity: null,
+          responseClass: "observed-event",
+          matchMethod: "published-polygon",
+          startedAt: p.firstdate || null,
+          observedAt: observedAt,
+           updatedAt: null,
+          expiresAt: null,
           description:
-            "Active fire perimeter of about " + Math.round(ha).toLocaleString() + " hectares (" +
-            Math.round(acres).toLocaleString() + " acres). Perimeter last updated " +
-            (p.lastdate ? new Date(p.lastdate).toLocaleDateString() : "recently") +
-            ". Individual Canadian fires are not individually named in this feed; the shaded area is the mapped perimeter. Source: Natural Resources Canada, CWFIS.",
+            "Satellite-derived FireM3 perimeter estimate of about " + Math.round(ha).toLocaleString() + " hectares (" +
+            Math.round(acres).toLocaleString() + " acres). Source observation date: " +
+            (observedAt ? new Date(observedAt).toLocaleDateString() : "not listed") +
+            ". This national monitoring product is not an operational incident perimeter, and this layer does not consistently name individual fires. Source: Natural Resources Canada, CWFIS.",
           link: { href: "https://cwfis.cfs.nrcan.gc.ca/interactive-map", label: "CWFIS interactive fire map" },
           source: "Natural Resources Canada (CWFIS)",
           geometry: f.geometry,
           fips: null,
-          point: c.length ? [c[0], c[1]] : null,
+          point: c,
           radiusKm: null,
         })
       );
@@ -469,6 +595,19 @@
       { id: "eonet", name: "Continental events (NASA EONET)", fetcher: fetchEONET },
     ],
     fetchJSON,
-    test: { fetchJSON, geometryIsUsable },
+    geometryIsUsable,
+    test: {
+      fetchJSON,
+      geometryIsUsable,
+      pointIsUsable,
+      responseClass,
+      mkEvent,
+      limits: {
+        maxGeometryVertices: MAX_GEOMETRY_VERTICES,
+        maxRingVertices: MAX_RING_VERTICES,
+        maxGeometryRings: MAX_GEOMETRY_RINGS,
+        maxGeometryPolygons: MAX_GEOMETRY_POLYGONS,
+      },
+    },
   };
 })();

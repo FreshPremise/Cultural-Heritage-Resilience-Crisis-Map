@@ -65,7 +65,6 @@ class RestrictedServerTests(unittest.TestCase):
     def test_repository_and_traversal_paths_are_not_served(self):
         for path in (
             "/SECURITY.md", "/README.md", "/scripts/serve_local.py", "/js/../SECURITY.md",
-            "/deployment/firebase.json", "/scripts/prepare_firebase.mjs",
         ):
             with self.subTest(path=path):
                 with self.assertRaises(urllib.error.HTTPError) as raised:

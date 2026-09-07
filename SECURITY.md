@@ -18,15 +18,22 @@ Never include API keys, private organization lists, or personal information in a
 - The site is static and contains no authentication or application database.
 - Uploaded organization lists remain in browser storage unless the user explicitly
   permits the experimental assistant to share relevant records with an AI provider.
-- Assistant API keys are kept in memory, not persistent browser storage.
+- Assistant API keys are kept in memory, not persistent browser storage, and are bound
+  to the canonical final request recipient. A recipient change requires re-entry.
+- Private-list consent is bound to that same recipient and the current page-local list
+  generation. Replacing or removing the list revokes the grant.
+- Private-list matches do not schedule NWS warned-zone requests or otherwise change that
+  shared refinement path. Private-only matches can remain labeled county approximations.
 - URLs imported from data or spreadsheets are restricted to HTTP(S); remote assistant
   endpoints require HTTPS, with HTTP allowed only for loopback development servers.
   Assistant endpoint URLs cannot contain credentials, query strings, or fragments.
 - Live-feed and assistant responses have byte limits and timeouts; geometries and feature
   counts are bounded before impact matching.
-- The Windows launcher uses `scripts/serve_local.py`, which binds to loopback, exposes only
-  runtime assets, disables directory listings and mutating methods, and supplies security
-  headers. Do not replace it with a network-exposed generic file server.
+- The Windows launcher delegates to `scripts/launch_local.py`, which directly binds a new
+  loopback server and opens only that owned socket. It never trusts or reuses an existing
+  listener. The restricted server exposes only runtime assets, disables directory listings
+  and mutating methods, and supplies security headers. Do not replace it with a
+  network-exposed generic file server.
 - Vendored MapLibre files have pinned SHA-256 values checked in CI, and repository files
   are scanned for common private-key and provider-token formats.
 

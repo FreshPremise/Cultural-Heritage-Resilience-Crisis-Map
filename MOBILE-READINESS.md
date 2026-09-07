@@ -1,8 +1,8 @@
 # Mobile support and known limitations
 
-Current build: `2026.08.28.1`
-Release date: August 28, 2026
-Asset version: `30`
+Current build: `2026.09.07.1`
+Release date: September 7, 2026
+Asset version: `31`
 
 Cultural Heritage Resilience is one responsive web application for desktop, tablet,
 and phone browsers. It is not a separate native iOS or Android application and does
@@ -47,9 +47,9 @@ On August 27, help-text and build-label checks passed at 1366x768 and 390x844. T
 hazard-popup guidance was also checked. At that checkpoint, 62 JavaScript tests and
 5 Python local-server tests passed.
 
-The August 28 release adds air-quality assistant metadata coverage, removes a redundant
-map resize listener, and adds tested Firebase package preparation. The dialog sizing
-and Active Events trend display are unchanged.
+The August 28 release added air-quality assistant metadata coverage and removed a
+redundant map resize listener. The dialog sizing and Active Events trend display were
+unchanged.
 
 August 28 verification:
 
@@ -72,7 +72,8 @@ August 28 verification:
 - Check a real notched device and assistive technology. Desktop viewport checks do
   not establish device-specific behavior, WebKit compatibility, or accessibility.
 - Complete screen-reader, keyboard-only, and broader accessibility testing.
-- After publication, verify the hosted build/version manifest and live phone layout.
+- Test a freshly downloaded release on a separate computer using the documented local
+  launcher and manual server options.
 
 Automated and desktop-browser checks do not replace these device and accessibility
 checks. The application is a situational-awareness prototype, not an emergency

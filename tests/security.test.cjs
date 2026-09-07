@@ -24,6 +24,44 @@ test("assistant base URLs reject embedded credentials and query-string secrets",
   assert.equal(security.safeHttpUrl("https://example.org/v1", options), "https://example.org/v1");
 });
 
+test("assistant recipients are canonical final endpoints", () => {
+  assert.equal(
+    security.assistantRecipient("openai", "https://EXAMPLE.org:443/a/../v1/"),
+    "https://example.org/v1/chat/completions"
+  );
+  assert.equal(
+    security.assistantRecipient("anthropic", "https://api.anthropic.com/"),
+    "https://api.anthropic.com/v1/messages"
+  );
+  assert.equal(
+    security.assistantRecipient("openai", "http://127.0.0.1:11434/v1"),
+    "http://127.0.0.1:11434/v1/chat/completions"
+  );
+  assert.equal(security.assistantRecipient("openai", "http://example.org/v1"), null);
+  assert.equal(security.assistantRecipient("unknown", "https://example.org/v1"), null);
+});
+
+test("credentials stay bound to one canonical recipient", () => {
+  const openai = security.assistantRecipient("openai", "https://api.openai.com/v1");
+  const same = security.assistantRecipient("openai", "https://API.OPENAI.COM:443/v1/");
+  const local = security.assistantRecipient("openai", "http://localhost:11434/v1");
+  const otherPath = security.assistantRecipient("openai", "https://api.openai.com/gateway/v1");
+  const otherTransport = security.assistantRecipient("anthropic", "https://api.openai.com/v1");
+  assert.equal(security.credentialForRecipient("secret", openai, same), "secret");
+  assert.equal(security.credentialForRecipient("secret", openai, local), "");
+  assert.equal(security.credentialForRecipient("secret", openai, otherPath), "");
+  assert.equal(security.credentialForRecipient("secret", openai, otherTransport), "");
+});
+
+test("private-list grants require both recipient and list generation", () => {
+  const recipient = security.assistantRecipient("openai", "https://api.openai.com/v1");
+  const grant = { recipient, generation: 7 };
+  assert.equal(security.privateGrantAllows(grant, recipient, 7), true);
+  assert.equal(security.privateGrantAllows(grant, recipient, 8), false);
+  assert.equal(security.privateGrantAllows(grant, "https://example.org/v1/chat/completions", 7), false);
+  assert.equal(security.privateGrantAllows(null, recipient, 7), false);
+});
+
 test("CSV cells with spreadsheet formulas are neutralized", () => {
   for (const value of ["=1+1", "+cmd", "-2+3", "@SUM(A1)", "\tformula"]) {
     assert.equal(security.neutralizeSpreadsheetCell(value), "'" + value);

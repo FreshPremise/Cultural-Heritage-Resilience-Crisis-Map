@@ -24,6 +24,35 @@
     return null;
   }
 
+  // Credentials and private-data consent are capabilities for one exact network
+  // recipient. Build that identity from the final provider endpoint, not from a
+  // provider label, so authority cannot silently follow a recipient change.
+  function assistantRecipient(kind, baseUrl) {
+    var safe = safeHttpUrl(baseUrl, {
+      allowLocalHttp: true,
+      rejectCredentials: true,
+      rejectQuery: true,
+    });
+    if (!safe) return null;
+    var route = kind === "anthropic" ? "/v1/messages" : kind === "openai" ? "/chat/completions" : null;
+    if (!route) return null;
+    try { return new URL(safe.replace(/\/+$/, "") + route).href; }
+    catch (e) { return null; }
+  }
+
+  function credentialForRecipient(secret, boundRecipient, currentRecipient) {
+    return secret && boundRecipient && currentRecipient && boundRecipient === currentRecipient ? String(secret) : "";
+  }
+
+  function privateGrantAllows(grant, currentRecipient, currentGeneration) {
+    return !!(
+      grant &&
+      grant.recipient &&
+      grant.recipient === currentRecipient &&
+      grant.generation === currentGeneration
+    );
+  }
+
   function neutralizeSpreadsheetCell(value) {
     var text = String(value == null ? "" : value);
     return /^[=+\-@\t\r]/.test(text) ? "'" + text : text;
@@ -72,6 +101,9 @@
 
   return {
     safeHttpUrl: safeHttpUrl,
+    assistantRecipient: assistantRecipient,
+    credentialForRecipient: credentialForRecipient,
+    privateGrantAllows: privateGrantAllows,
     neutralizeSpreadsheetCell: neutralizeSpreadsheetCell,
     filterAssistantOrganizations: filterAssistantOrganizations,
     privateOrganizationRecord: privateOrganizationRecord,

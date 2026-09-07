@@ -11,6 +11,8 @@ const feeds = fs.readFileSync(path.join(root, "js", "feeds.js"), "utf8");
 const chat = fs.readFileSync(path.join(root, "js", "chat.js"), "utf8");
 const css = fs.readFileSync(path.join(root, "styles.css"), "utf8");
 const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+const dataSources = fs.readFileSync(path.join(root, "DATA_SOURCES.md"), "utf8");
+const gitignore = fs.readFileSync(path.join(root, ".gitignore"), "utf8");
 const privacy = fs.readFileSync(path.join(root, "privacy.html"), "utf8");
 const version = JSON.parse(fs.readFileSync(path.join(root, "version.json"), "utf8"));
 
@@ -26,6 +28,23 @@ function functionSource(name) {
   return match[0];
 }
 
+function contrastRatio(foreground, background) {
+  function luminance(hex) {
+    const channels = hex.match(/[0-9a-f]{2}/gi).map((value) => parseInt(value, 16) / 255);
+    const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+  }
+  const light = luminance(foreground);
+  const dark = luminance(background);
+  return (Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05);
+}
+
+function cssVariable(block, name) {
+  const value = block.match(new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i"))?.[1];
+  assert.ok(value, `missing --${name}`);
+  return value;
+}
+
 test("README shows the repository-owned application screenshot before What it does", () => {
   const imageRef = "docs/images/cultural-heritage-resilience-map.png";
   const imagePosition = readme.indexOf(`](${imageRef})`);
@@ -36,7 +55,40 @@ test("README shows the repository-owned application screenshot before What it do
 });
 
 test("README identifies the Windows launcher as an alternative to the manual server steps", () => {
-  assert.match(readme, /\*\*Windows alternative:\*\* Instead of following steps 3–5 above/);
+  assert.match(readme, /\*\*Windows alternative:\*\* Instead of following steps 3-5 above/);
+  assert.match(readme, /`Launch-Cultural-Heritage-Resilience\.ps1`/);
+  assert.match(readme, /opens only the\s+port that process owns/);
+  assert.match(readme, /never probes or reuses an existing local web server/);
+  assert.doesNotMatch(readme, /Start-Cultural-Heritage-Resilience\.ps1/);
+});
+
+test("README presents local use and rejects unsupported direct-file use", () => {
+  assert.match(readme, /The application is designed to be downloaded and run locally\./);
+  assert.match(readme, /Opening `index\.html` directly is not supported\. Use one of the local server options above\./);
+  assert.doesNotMatch(readme, /open `index\.html` directly/i);
+});
+
+test("methodology documents every live-feed selection threshold and partial-data limit", () => {
+  for (const rule of [
+    /NWS[\s\S]*Moderate, Severe, or Extreme/,
+    /Environment and Climate Change Canada[\s\S]*orange or red/,
+    /USGS[\s\S]*magnitude 3\.0 or greater/,
+    /NIFC WFIGS[\s\S]*at least 100 acres/,
+    /CWFIS[\s\S]*larger than 500 hectares/,
+    /NASA EONET[\s\S]*Up to 300 open/,
+    /5,000-feature boundary/,
+    /64 MB per-response boundary/,
+    /partial refresh is not a complete trend\s+observation/,
+  ]) assert.match(dataSources, rule);
+  assert.match(dataSources, /USGS \| 30 km for M3\.0-4\.49; 70 km for M4\.5-5\.49; 150 km for M5\.5-6\.49; 300 km for M6\.5\+/);
+  assert.match(dataSources, /WFIGS \| The radius of a circle with the reported incident area, plus an 8 km buffer, with an 8 km minimum/);
+  assert.match(dataSources, /NASA EONET \| 300 km for severe storms; 50 km for volcanoes and floods; 25 km for wildfires/);
+});
+
+test("the private audit script has an exact root-relative ignore rule", () => {
+  const rules = gitignore.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  assert.ok(rules.includes("/scripts/audit_match_accuracy.mjs"));
+  assert.ok(!rules.includes("scripts/audit_match_accuracy.mjs"), "ignore must remain anchored to the repository root");
 });
 
 test("README requires Node.js 22 or later for the quoted test glob", () => {
@@ -93,7 +145,9 @@ test("release metadata, update discovery, and cache-busting reload stay synchron
     month: "long", day: "numeric", year: "numeric", timeZone: "UTC",
   });
   assert.ok(html.includes(`Build ${version.build} · Released ${releaseDate}`));
-  assert.match(app, /new URL\("\/version\.json", window\.location\.origin\)/);
+  assert.ok(app.includes("!/^https?:$/.test(window.location.protocol)"));
+  assert.match(app, /new URL\("version\.json", document\.baseURI\)/);
+  assert.match(app, /versionUrl\.searchParams\.set\("check", String\(Date\.now\(\)\)\)/);
   assert.match(app, /cache: "no-store"/);
   assert.match(app, /credentials: "same-origin"/);
   assert.match(app, /redirect: "error"/);
@@ -142,9 +196,79 @@ test("the basemap uses OpenFreeMap without CARTO or API credentials", () => {
   assert.match(readme, /OpenFreeMap provides the OpenStreetMap-derived basemap/);
 });
 
-test("the default Groq model is current and supports tool use", () => {
+test("the approved Groq model id is configured", () => {
   assert.match(chat, /defaultModel: "openai\/gpt-oss-120b"/);
   assert.doesNotMatch(chat, /llama-3\.3-70b-versatile/);
+});
+
+test("the document has one primary heading and every dialog has an accessible name", () => {
+  assert.equal((html.match(/<h1\b/g) || []).length, 1);
+  assert.match(html, /<h1 class="brand-title">/);
+  for (const [dialogId, titleId] of [
+    ["about", "about-title"],
+    ["select-overlay", "select-overlay-title"],
+    ["outreach", "outreach-title"],
+  ]) {
+    assert.match(openingTag(dialogId), new RegExp(`aria-labelledby="${titleId}"`));
+    assert.match(html, new RegExp(`<h2 id="${titleId}">`));
+  }
+});
+
+test("organization search implements the combobox state and keyboard contract", () => {
+  const search = openingTag("search");
+  const results = openingTag("search-results");
+  const status = openingTag("search-status");
+  assert.match(search, /role="combobox"/);
+  assert.match(search, /aria-autocomplete="list"/);
+  assert.match(search, /aria-controls="search-results"/);
+  assert.match(search, /aria-expanded="false"/);
+  assert.match(search, /aria-describedby="search-status"/);
+  assert.match(results, /role="listbox"/);
+  assert.match(status, /class="sr-only"/);
+  assert.match(status, /role="status"/);
+  assert.match(status, /aria-live="polite"/);
+
+  const searchSource = functionSource("setupSearch");
+  assert.match(searchSource, /input\.setAttribute\("aria-expanded", "false"\)/);
+  assert.match(searchSource, /input\.setAttribute\("aria-expanded", "true"\)/);
+  assert.match(searchSource, /role="option" aria-selected="false"/);
+  assert.match(searchSource, /node\.setAttribute\("aria-selected", String\(selected\)\)/);
+  assert.match(searchSource, /input\.setAttribute\("aria-activedescendant", node\.id\)/);
+  assert.match(searchSource, /node\.scrollIntoView\(\{ block: "nearest" \}\)/);
+  assert.match(searchSource, /if \(!items\.length && e\.key === "Enter"\) \{ e\.preventDefault\(\); return; \}/);
+});
+
+test("clickable event and organization rows use native controls with focus styles", () => {
+  assert.match(html, /<ul id="event-list" class="event-list"><\/ul>/);
+  assert.match(app, /<li><button type="button" class="event-item"/);
+  assert.match(app, /<button type="button" class="org-row"/);
+  assert.match(app, /<button type="button" class="p-evt"/);
+  assert.doesNotMatch(app, /<div class="(?:event-item|org-row|p-evt)"/);
+  for (const selector of ["event-item", "org-row", "p-evt"]) {
+    const block = css.match(new RegExp(`\\.${selector}\\s*\\{([^}]*)\\}`))?.[1] || "";
+    if (selector === "org-row") {
+      for (const side of ["top", "right", "left"]) assert.match(block, new RegExp(`border-${side}:\\s*0;`));
+      assert.match(block, /border-bottom:\s*1px solid var\(--line\);/);
+    } else {
+      assert.match(block, /border:\s*0;/, `${selector} should reset the native button border`);
+    }
+    assert.match(block, /background:\s*transparent;/, `${selector} should reset the native button background`);
+    assert.match(css, new RegExp(`\\.${selector}:focus-visible`));
+  }
+  assert.match(css, /\.org-row, \.p-evt \{ min-height: 44px; \}/);
+});
+
+test("assistant disclosure state and settings state stay synchronized for assistive technology", () => {
+  assert.match(openingTag("assistant"), /aria-labelledby="assistant-title"/);
+  assert.match(openingTag("assistant"), /aria-hidden="true"/);
+  assert.match(openingTag("asst-launch"), /aria-controls="assistant"/);
+  assert.match(openingTag("asst-launch"), /aria-expanded="false"/);
+  assert.match(openingTag("asst-settings-btn"), /aria-controls="asst-settings"/);
+  assert.match(openingTag("asst-settings-btn"), /aria-expanded="false"/);
+  assert.match(chat, /function openPanel\(\)[\s\S]*?setAttribute\("aria-hidden", "false"\)[\s\S]*?setAttribute\("aria-expanded", "true"\)/);
+  assert.match(chat, /function closePanel\(\)[\s\S]*?setAttribute\("aria-hidden", "true"\)[\s\S]*?setAttribute\("aria-expanded", "false"\)[\s\S]*?el\("asst-launch"\)\.focus\(\)/);
+  assert.match(chat, /function openSettings\(\)[\s\S]*?setAttribute\("aria-expanded", "true"\)/);
+  assert.match(chat, /function closeSettings\(\)[\s\S]*?setAttribute\("aria-expanded", "false"\)/);
 });
 
 test("mobile controls have semantic collapsed defaults and hidden content stays hidden", () => {
@@ -258,7 +382,8 @@ test("responsive rules cover tablets, touch targets, and device safe areas", () 
   assert.match(css, /@media \(max-width: 1200px\)[\s\S]*?\.stats, \.brand-sub, \.feed-label \{ display: none; \}/);
   assert.match(css, /@media \(max-width: 1200px\)[\s\S]*?\.search \{ width: auto; min-width: 0; flex: 1; margin-left: 0; \}/);
   assert.match(mobile, /#map\s*\{\s*height:\s*46%;\s*flex:\s*none;\s*\}/);
-  assert.match(mobile, /#feed-status\s*\{\s*display:\s*none;\s*\}/);
+  assert.match(mobile, /#feed-status\s*\{[^}]*position:\s*absolute;[^}]*width:\s*1px;[^}]*height:\s*1px;[^}]*clip:\s*rect\(0, 0, 0, 0\);/);
+  assert.match(mobile, /\.feed-summary-indicator \{ display: block; \}/);
   assert.match(css, /\.mobile-panel-controls,\s*\.mobile-filter-toggle\s*\{\s*display:\s*none;\s*\}/);
   assert.match(mobile, /\.mobile-panel-controls\s*\{[^}]*display:\s*flex;[^}]*min-height:\s*44px/);
   assert.match(mobile, /\.evt-meta\s*\{[^}]*display:\s*-webkit-box;[^}]*-webkit-line-clamp:\s*2;[^}]*-webkit-box-orient:\s*vertical;[^}]*overflow:\s*hidden;/);
@@ -272,8 +397,65 @@ test("responsive rules cover tablets, touch targets, and device safe areas", () 
   assert.match(css, /\.update-notice\s*\{[^}]*top:\s*calc\(64px \+ env\(safe-area-inset-top\)\)/);
   assert.match(css, /@media \(max-width: 680px\)[\s\S]*?\.update-notice\s*\{[^}]*top:\s*calc\(60px \+ env\(safe-area-inset-top\)\)/);
   assert.match(css, /#assistant\.collapsed \{ display: none; width: 0; \}/);
-  assert.match(css, /@media \(max-width: 680px\)[\s\S]*#feed-status \{ display: none; \}/);
-  assert.match(css, /@media \(max-width: 560px\)[\s\S]*\.brand-text \{ display: none; \}/);
+  assert.doesNotMatch(css, /#feed-status\s*\{[^}]*display:\s*none/);
+  assert.match(css, /@media \(max-width: 560px\)[\s\S]*?\.brand-text\s*\{[^}]*position:\s*absolute;[^}]*clip:\s*rect\(0, 0, 0, 0\);/);
+});
+
+test("feed health remains available to screen readers and visible in compact layouts", () => {
+  const status = openingTag("feed-status");
+  assert.match(status, /role="status"/);
+  assert.match(status, /aria-live="polite"/);
+  assert.match(status, /aria-atomic="true"/);
+  assert.match(openingTag("feed-summary-indicator"), /aria-hidden="true"/);
+  assert.match(html, /<button id="refresh-btn"[\s\S]*?<span id="feed-summary-indicator"[\s\S]*?<\/button>/);
+  assert.match(css, /\.sr-only\s*\{[^}]*width:\s*1px !important;[^}]*clip:\s*rect\(0, 0, 0, 0\) !important;/);
+
+  const feedStatus = functionSource("setFeedStatus");
+  assert.match(feedStatus, /<span class="sr-only">/);
+  assert.match(feedStatus, /Refresh feeds\. " \+ summary/);
+  assert.match(feedStatus, /indicator\.className = "dot feed-summary-indicator " \+ \(pending \? "pending" : failed\.length \? "fail" : stale\.length \? "stale" : "ok"\)/);
+  assert.match(functionSource("renderFeedWarning"), /Counts, exports, briefs, and trends may be incomplete\./);
+  assert.match(app, /if \(state\.feedsComplete\) \{\s*renderTrend\(recordHistory\(publicHistoryAffectedCount\(\)\), true\);/);
+  assert.match(app, /currentHistoryPointTime = 0;\s*renderTrend\(loadHistory\(\), false\);/);
+});
+
+test("radar freshness is age-bounded and its state remains visible in compact layouts", () => {
+  const source = functionSource("radarFrameIsFresh");
+  const context = { RADAR_FRESH_MAX_AGE_SECONDS: 30 * 60, result: null };
+  vm.runInNewContext(
+    `${source}; result = {
+      current: radarFrameIsFresh(10_000, 10_100),
+      boundary: radarFrameIsFresh(8_200, 10_000),
+      old: radarFrameIsFresh(8_199, 10_000),
+      future: radarFrameIsFresh(10_601, 10_000),
+    };`,
+    context
+  );
+  assert.equal(context.result.current, true);
+  assert.equal(context.result.boundary, true);
+  assert.equal(context.result.old, false);
+  assert.equal(context.result.future, false);
+  assert.match(app, /state\.radarState = radarFrameIsFresh\(RADAR\.time\) \? "fresh" : "stale"/);
+  assert.match(openingTag("radar-status-label"), /class="radar-status-label"/);
+  assert.match(functionSource("updateRadarAccessibility"), /visible\.textContent = state\.radarOn/);
+  assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.radar-status-label\s*\{[^}]*display:\s*block;/);
+});
+
+test("secondary text and lower-severity colors meet normal-text contrast", () => {
+  const light = css.match(/:root\s*\{([\s\S]*?)\n\}/)?.[1] || "";
+  const dark = css.match(/\[data-theme="dark"\]\s*\{([\s\S]*?)\n\}/)?.[1] || "";
+  const checks = [
+    [light, "ink-3", "panel-2"],
+    [light, "sev2", "panel-2"],
+    [light, "sev1", "panel-2"],
+    [dark, "ink-3", "panel-2"],
+    [dark, "sev2", "panel-2"],
+    [dark, "sev1", "panel-2"],
+  ];
+  for (const [block, foreground, background] of checks) {
+    const ratio = contrastRatio(cssVariable(block, foreground), cssVariable(block, background));
+    assert.ok(ratio >= 4.5, `${foreground} on ${background} contrast is only ${ratio.toFixed(2)}:1`);
+  }
 });
 
 test("stacked list-priority mode keeps map controls in one short row", () => {
@@ -433,8 +615,12 @@ test("private-list assistant sharing is hidden without a list and clearly states
   assert.match(html, /id="asst-private-option" hidden/);
   assert.doesNotMatch(chat, /No private organization list is currently loaded/);
   assert.match(chat, /Off\. The assistant cannot see or use your uploaded list\./);
-  assert.match(chat, /On for this tab\./);
+  assert.match(chat, /On for this tab and this list\. Relevant records may be sent only to/);
+  assert.match(chat, /Sharing must be approved separately for each recipient and replacement list\./);
   assert.match(chat, /hw:selected-list-changed/);
+  assert.match(chat, /Security\.privateGrantAllows\(settings\.privateGrant, recipient, list\.generation\)/);
+  assert.match(chat, /draftConsentRecipient === nextRecipient && draftPrivateGeneration === list\.generation/);
+  assert.match(chat, /window\.addEventListener\("hw:selected-list-changed"[\s\S]*?settings\.privateGrant = null/);
 });
 
 test("assistant discloses missing information and provider output cutoffs", () => {
@@ -466,15 +652,22 @@ test("the information button is larger than the other header icons", () => {
 
 test("the information panel uses concise copy and a visual map-reading guide", () => {
   const downloadNote = "This project may be downloaded from";
-  assert.ok(html.indexOf(downloadNote) > html.indexOf("<h2>Cultural Heritage Resilience</h2>"));
+  assert.ok(html.indexOf(downloadNote) > html.indexOf('<h2 id="about-title">Cultural Heritage Resilience</h2>'));
   assert.ok(html.indexOf(downloadNote) < html.indexOf('class="about-prototype"'));
+  assert.match(openingTag("about"), /aria-labelledby="about-title"/);
   assert.match(html, /This project may be downloaded from <a href="https:\/\/github\.com\/FreshPremise\/Cultural-Heritage-Resilience-Crisis-Map"[^>]*>GitHub<\/a>\./);
   assert.match(html, /Prototype:<\/b> This map shows a non-exhaustive sample of cultural heritage organizations across North America/);
+  assert.match(html, /This beta monitors 2,583 institutions/);
+  assert.doesNotMatch(html, /47,?000|47 thousand/i);
+  assert.match(readme, /Displays 2,583 libraries, museums, and archives/);
+  assert.doesNotMatch(readme, /47,?000|47 thousand/i);
   assert.match(html, /class="about-prototype"/);
   assert.match(html, /This is an interactive live crisis map for North American cultural heritage organizations/);
   assert.match(html, /class="about-map-guide"/);
   assert.match(html, /id="about-hazard-icons"/);
   assert.match(html, /Red stars\.<\/b> These are organizations from your uploaded spreadsheet/);
+  assert.match(html, /National Weather Service alerts<\/a> — US watches, warnings, and advisories/);
+  assert.match(html, /CWFIS includes satellite-derived Canadian FireM3 perimeter estimates larger than 500 hectares; these are not operational incident perimeters/);
   assert.match(html, /IMLS Public Libraries Survey \(PLS\), FY2023/);
   assert.match(html, /NCES Integrated Postsecondary Education Data System \(IPEDS\), FY2023 Academic Libraries and Directory Information/);
   assert.match(html, /href="data\/organizations\.js"[^>]*>Curated North American demonstration set<\/a>/);
@@ -486,7 +679,8 @@ test("the information panel uses concise copy and a visual map-reading guide", (
 });
 
 test("the Select overlay dialog uses the approved wording without em dashes", () => {
-  const dialog = html.match(/<dialog id="select-overlay">[\s\S]*?<\/dialog>/)?.[0] || "";
+  const dialog = html.match(/<dialog id="select-overlay"[^>]*>[\s\S]*?<\/dialog>/)?.[0] || "";
+  assert.match(dialog, /aria-labelledby="select-overlay-title"/);
   assert.match(dialog, /Upload a spreadsheet with organizations that you wish to see on the map\./);
   assert.doesNotMatch(dialog, /—/);
   assert.match(app, /Your list is active: /);
@@ -532,13 +726,66 @@ test("large live result sets are paged only after impact matching", () => {
   assert.match(app, /state\.listLimit \+= EVENT_LIST_PAGE_SIZE/);
 });
 
+test("the spatial index keeps a representative large-data candidate workload bounded", () => {
+  const GRID_DEGREES = 2;
+  const ORGS = Array.from({ length: 10000 }, (_, i) => ({
+    id: `org${i}`,
+    lon: -169 + (i % 200) * 0.59,
+    lat: 10 + Math.floor(i / 200) * 1.4,
+  }));
+  const orgGrid = {};
+  for (const org of ORGS) {
+    const key = `${Math.floor(org.lon / GRID_DEGREES)}:${Math.floor(org.lat / GRID_DEGREES)}`;
+    (orgGrid[key] ||= []).push(org);
+  }
+  const context = { ORGS, orgGrid, orgsByFips: {}, GRID_DEGREES, total: 0 };
+  const started = performance.now();
+  vm.runInNewContext(
+    `${functionSource("orgsInBounds")}; ${functionSource("candidateOrganizations")};
+     for (let i = 0; i < 1000; i++) {
+       const org = ORGS[(i * 37) % ORGS.length];
+       total += candidateOrganizations({ point: [org.lon, org.lat], radiusKm: 30 }).length;
+     }`,
+    context
+  );
+  const elapsed = performance.now() - started;
+  assert.ok(context.total < 100000, `candidate ceiling exceeded: ${context.total}`);
+  assert.ok(elapsed < 2000, `representative candidate benchmark took ${elapsed.toFixed(1)} ms`);
+});
+
 test("NWS alerts keep host-checked warned-zone URLs for the polygon upgrade", () => {
   assert.match(feeds, /zones: zoneUrls\.length \? zoneUrls : null/);
+  assert.match(feeds, /zonesTruncated,/);
+  assert.match(feeds, /rawZoneUrls\.length !== allZoneUrls\.length \|\| allZoneUrls\.length > MAX_NWS_ZONE_URLS/);
   assert.ok(
     feeds.includes("/^https:\\/\\/api\\.weather\\.gov\\/zones\\//.test(u)"),
     "affectedZones URLs must be restricted to api.weather.gov"
   );
   assert.match(feeds, /window\.Feeds = \{[\s\S]*?\n    fetchJSON,/);
+  assert.match(feeds, /window\.Feeds = \{[\s\S]*?\n    geometryIsUsable,/);
+});
+
+test("estimated wildfire areas and rendered circles are bounded", () => {
+  assert.match(feeds, /const MAX_WFIGS_ACRES = 100000000/);
+  assert.match(feeds, /acres > MAX_WFIGS_ACRES/);
+  const source = functionSource("circlePolygon");
+  const context = { result: null };
+  vm.runInNewContext(
+    `${source}; result = {
+      valid: circlePolygon([-122, 44], 300),
+      huge: circlePolygon([-122, 44], 501),
+      invalidPoint: circlePolygon([Infinity, 44], 30),
+    };`,
+    context
+  );
+  assert.equal(context.result.valid.type, "Polygon");
+  assert.equal(context.result.huge, null);
+  assert.equal(context.result.invalidPoint, null);
+});
+
+test("impact-changing operations dismiss snapshot popups", () => {
+  assert.match(functionSource("computeImpact"), /if \(popup\) popup\.remove\(\);/);
+  assert.match(functionSource("rerenderImpactViews"), /if \(popup\) popup\.remove\(\);/);
 });
 
 test("a county-matched alert upgrades to its warned-zone polygon and sheds outside organizations", () => {
@@ -569,12 +816,16 @@ test("a county-matched alert upgrades to its warned-zone polygon and sheds outsi
     },
     result: null,
   };
+  const feedsContext = { window: {} };
+  vm.runInNewContext(feeds, feedsContext);
+  context.Feeds = { geometryIsUsable: feedsContext.window.Feeds.geometryIsUsable };
   vm.runInNewContext(
     `${sources.join(";\n")};\n` +
       `result = {
         countyMatchSalem: orgInEvent(salem, event),
         approxBefore: isApproxMatch(event),
-        keys: eventZoneKeys(event),
+         keys: eventZoneKeys(event),
+         truncatedKeys: eventZoneKeys(Object.assign({}, event, { zonesTruncated: true })),
         forecastKey: zoneKey("https://api.weather.gov/zones/forecast/ORZ011"),
         fireKey: zoneKey("https://api.weather.gov/zones/fire/ORZ011"),
         foreignKey: zoneKey("https://example.com/zones/fire/ORZ011"),
@@ -591,6 +842,7 @@ test("a county-matched alert upgrades to its warned-zone polygon and sheds outsi
   assert.equal(context.result.countyMatchSalem, true, "county fallback should match Salem before the upgrade");
   assert.equal(context.result.approxBefore, true);
   assert.deepEqual(Array.from(context.result.keys), ["fire/ORZ703"]);
+  assert.equal(context.result.truncatedKeys, null, "a bounded subset must not be applied as a complete warned area");
   assert.equal(context.result.forecastKey, "forecast/ORZ011");
   assert.equal(context.result.fireKey, "fire/ORZ011");
   assert.equal(context.result.foreignKey, null, "non-NWS zone URLs must not produce cache keys");
@@ -602,6 +854,41 @@ test("a county-matched alert upgrades to its warned-zone polygon and sheds outsi
   assert.equal(context.result.warmSpringsAfter, true, "organizations inside the zone must still match");
 });
 
+test("trend history keeps a stable public scope and revises the current complete sample after zone refinement", () => {
+  const names = ["loadHistory", "recordHistory", "publicHistoryAffectedCount", "reviseCurrentHistory", "renderTrend"];
+  const sources = names.map(functionSource).join(";\n");
+  const storage = {};
+  const trend = { innerHTML: "", title: "", removeAttribute(name) { if (name === "title") this.title = ""; } };
+  const context = {
+    HIST_LS: "history-test",
+    currentHistoryPointTime: 0,
+    affectedEntries: [{ org: {} }, { org: { selected: true } }, { org: {} }],
+    notWatch: function () { return true; },
+    affectedIndex: function () { return context.affectedEntries; },
+    localStorage: {
+      getItem: function (key) { return storage[key] || null; },
+      setItem: function (key, value) { storage[key] = value; },
+    },
+    el: function () { return trend; },
+    result: null,
+  };
+  vm.runInNewContext(
+    `${sources}; Date.now = () => 10000;
+     const publicCount = publicHistoryAffectedCount();
+     const first = recordHistory(publicCount);
+     const revised = reviseCurrentHistory(1);
+     renderTrend([{ t: 9000, a: 3, complete: true }, { t: 10000, a: 1, complete: true }], false);
+     result = { publicCount, first: first.map(p => ({...p})), revised: revised.map(p => ({...p})), title: el().title };`,
+    context
+  );
+  assert.equal(context.result.publicCount, 2, "private-list records must not change the public trend scope");
+  assert.equal(context.result.first[0].a, 2);
+  assert.equal(context.result.revised.length, 1, "zone refinement must revise instead of appending");
+  assert.equal(context.result.revised[0].a, 1);
+  assert.match(context.result.title, /last complete refresh 1, peak 3/);
+  assert.match(functionSource("afterZoneUpgrade"), /renderTrend\(reviseCurrentHistory\(publicHistoryAffectedCount\(\)\), true\)/);
+});
+
 test("the My list only view narrows every display surface to uploaded organizations", () => {
   assert.match(app, /mine\.id = "only-mine-chip"/);
   assert.match(app, /var ONLY_LS = "hw-only-selected"/);
@@ -609,7 +896,7 @@ test("the My list only view narrows every display surface to uploaded organizati
   assert.match(app, /orgShown\(o\) && \(o\.name\.toLowerCase\(\)/);
   assert.match(app, /\(includeHiddenOrgs \? e\.affected : e\.affectedShown\)\.forEach/);
   assert.match(app, /affectedIndex\(filterFn, false, true\)/);
-  assert.match(app, /mapShowsOnlyPrivateList: !!state\.onlySelected/);
+  assert.match(app, /mapShowsOnlyPrivateList: includeSelected \? !!state\.onlySelected : false/);
   assert.match(app, /localStorage\.getItem\("hw-only-selected"\) === "1" && ORGS\.some/);
   assert.match(html, /a "My list only" button appears/);
   assert.match(css, /\.chip \.cdot\.star \{/);
@@ -651,14 +938,41 @@ test("the My list only view narrows every display surface to uploaded organizati
 test("county-level matches are labeled approximate until the exact zone arrives", () => {
   assert.match(app, /applyCachedZonePolygons\(\);\n      computeImpact\(\);/);
   assert.match(app, /fetchMissingZonePolygons\(generation\);/);
-  assert.match(app, /fetchMissingZonePolygons\(feedGeneration\);/);
+  assert.doesNotMatch(functionSource("selectionChanged"), /fetchMissingZonePolygons/);
   assert.match(app, /Feeds\.fetchJSON\(queue\[key\], 20000, ZONE_FETCH_MAX_BYTES\)/);
   assert.match(app, /class="approx-flag"/);
-  assert.match(app, /County-level \(approximate\)/);
-  assert.match(app, /matchPrecision: isApproxMatch\(e\) \? "county-approximate" : "footprint"/);
+  assert.match(app, /"county-approximate": "County-level approximation"/);
+  assert.match(app, /e\.matchMethod = "official-zone"/);
+  assert.match(app, /matchMethod: e\.matchMethod \|\| \(isApproxMatch\(e\) \? "county-approximate" : "unknown"\)/);
+  assert.match(app, /matchPrecision: e\.matchMethod \|\| \(isApproxMatch\(e\) \? "county-approximate" : "unknown"\)/);
+  assert.match(app, /var ZONE_LS = "hw-zone-geoms-v2"/);
+  assert.match(functionSource("loadZoneStore"), /localStorage\.removeItem\(LEGACY_ZONE_LS\)/);
   assert.match(app, /localStorage\.removeItem\(ZONE_LS\)/);
   assert.match(css, /\.approx-flag \{/);
   const approxTitle = app.match(/var APPROX_TITLE = "([^"]+)"/)?.[1] || "";
   assert.ok(approxTitle.length > 40, "approximate-match explanation is missing");
   assert.doesNotMatch(approxTitle, /—/);
+});
+
+test("private-list matches cannot schedule official-zone network requests", () => {
+  const countSource = functionSource("eventPublicAffectedCount");
+  const fetchSource = functionSource("fetchMissingZonePolygons");
+  const context = {
+    orgById: {
+      public1: { selected: false },
+      private1: { selected: true },
+    },
+    result: null,
+  };
+  vm.runInNewContext(
+    `${countSource}; result = {
+      publicOnly: eventPublicAffectedCount({ affected: ["public1"] }),
+      privateOnly: eventPublicAffectedCount({ affected: ["private1"] }),
+      mixed: eventPublicAffectedCount({ affected: ["public1", "private1"] })
+    };`,
+    context
+  );
+  assert.deepEqual({ ...context.result }, { publicOnly: 1, privateOnly: 0, mixed: 1 });
+  assert.match(fetchSource, /!eventPublicAffectedCount\(e\)/);
+  assert.doesNotMatch(fetchSource, /e\.affected\.length/);
 });

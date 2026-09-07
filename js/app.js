@@ -26,6 +26,9 @@
   var orgById = {};
   var orgsByFips = {};
   var orgGrid = {};
+  // Every successful replacement or removal advances this page-local token so assistant
+  // consent for an earlier private list cannot authorize a later list.
+  var privateListGeneration = Math.floor(Math.random() * 0x7fffffff) + 1;
   var GRID_DEGREES = 2;
   function loadSelected() {
     try {
@@ -143,7 +146,7 @@
 
   /* ---------------- release updates ---------------- */
 
-  var APP_BUILD = "2026.08.28.1";
+  var APP_BUILD = "2026.09.07.1";
   var VERSION_CHECK_INTERVAL_MS = 5 * 60 * 1000;
   var latestAvailableBuild = "";
   var versionCheckPending = false;
@@ -170,9 +173,9 @@
   }
 
   function checkForAppUpdate() {
-    if (versionCheckPending || !window.fetch) return Promise.resolve(false);
+    if (versionCheckPending || !window.fetch || !/^https?:$/.test(window.location.protocol)) return Promise.resolve(false);
     versionCheckPending = true;
-    var versionUrl = new URL("/version.json", window.location.origin);
+    var versionUrl = new URL("version.json", document.baseURI);
     versionUrl.searchParams.set("check", String(Date.now()));
     return fetch(versionUrl.href, {
       cache: "no-store",
@@ -253,8 +256,13 @@
 
   function orgsInBounds(bounds) {
     if (!bounds) return ORGS;
-    var minX = Math.floor(bounds[0] / GRID_DEGREES), maxX = Math.floor(bounds[2] / GRID_DEGREES);
-    var minY = Math.floor(bounds[1] / GRID_DEGREES), maxY = Math.floor(bounds[3] / GRID_DEGREES);
+    if (!Array.isArray(bounds) || bounds.length < 4 || !bounds.every(Number.isFinite)) return [];
+    if (bounds[0] > bounds[2] || bounds[1] > bounds[3]) return [];
+    var minX = Math.floor(Math.max(-180, bounds[0]) / GRID_DEGREES);
+    var maxX = Math.floor(Math.min(180, bounds[2]) / GRID_DEGREES);
+    var minY = Math.floor(Math.max(-90, bounds[1]) / GRID_DEGREES);
+    var maxY = Math.floor(Math.min(90, bounds[3]) / GRID_DEGREES);
+    if (maxX - minX > 180 || maxY - minY > 90) return [];
     var out = [];
     for (var x = minX; x <= maxX; x++) {
       for (var y = minY; y <= maxY; y++) {
@@ -299,7 +307,14 @@
     listLimit: EVENT_LIST_PAGE_SIZE,
     affectedMode: "now",
     updatedAt: null,
+    feedsCheckedAt: null,
+    dataAsOf: null,
+    feedStates: {},
+    feedsComplete: false,
+    unavailableFeeds: [],
+    performanceMetrics: { impactMs: 0, geojsonMs: 0, eventCount: 0, organizationCount: 0, candidateChecks: 0 },
     radarOn: true,
+    radarState: "loading",
     legendCollapsed: false,
     // Hazard areas containing no mapped organizations are hidden by default. Agencies
     // publish hundreds of them — Canada alone runs ~300 remote wildfire perimeters — and
@@ -442,12 +457,14 @@
         id: e.id,
         hasOrgs: e.affectedShown.length ? 1 : 0,
         cwfis: isCwfisWildfire(e) ? 1 : 0,
+        matchMethod: e.matchMethod || "unknown",
       };
       if (!shouldRenderHazardArea(e, props.hasOrgs)) return;
       if (e.geometry) {
         feats.push({ type: "Feature", properties: props, geometry: e.geometry });
       } else if (e.point && e.radiusKm) {
-        feats.push({ type: "Feature", properties: props, geometry: circlePolygon(e.point, e.radiusKm) });
+        var circle = circlePolygon(e.point, e.radiusKm);
+        if (circle) feats.push({ type: "Feature", properties: props, geometry: circle });
       }
     });
     return { type: "FeatureCollection", features: feats };
@@ -597,15 +614,41 @@
   // layer that makes the map read like a weather map: you see the actual storm, not just
   // the polygon an agency drew around it.
   var RADAR = { host: "", path: "", time: 0 };
+  var radarRefreshPromise = null;
+  var RADAR_FRESH_MAX_AGE_SECONDS = 30 * 60;
+
+  function validRadarHost(value) {
+    var safe = Security.safeHttpUrl(value, { rejectCredentials: true, rejectQuery: true });
+    if (!safe) return null;
+    try {
+      var u = new URL(safe);
+      var host = u.hostname.toLowerCase();
+      if (u.protocol !== "https:" || (host !== "tilecache.rainviewer.com" && !host.endsWith(".tilecache.rainviewer.com"))) return null;
+      if ((u.port && u.port !== "443") || (u.pathname !== "/" && u.pathname !== "")) return null;
+      return u.origin;
+    } catch (e) { return null; }
+  }
+
+  function validRadarFrame(value) {
+    if (!value || typeof value.path !== "string" || !/^\/[A-Za-z0-9/_-]{1,180}$/.test(value.path) || value.path.indexOf("..") !== -1) return null;
+    var timestamp = Number(value.time);
+    if (!Number.isFinite(timestamp) || timestamp < 1 || timestamp > Date.now() / 1000 + 600) return null;
+    return { path: value.path, time: timestamp };
+  }
+
+  function radarFrameIsFresh(timestamp, nowSeconds) {
+    var now = Number.isFinite(nowSeconds) ? nowSeconds : Date.now() / 1000;
+    return Number.isFinite(timestamp) && timestamp <= now + 600 && timestamp >= now - RADAR_FRESH_MAX_AGE_SECONDS;
+  }
 
   function loadRadarFrame() {
-    return fetch("https://api.rainviewer.com/public/weather-maps.json")
-      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+    return Feeds.fetchJSON("https://api.rainviewer.com/public/weather-maps.json", 10000, 256 * 1024)
       .then(function (j) {
         var past = (j.radar && j.radar.past) || [];
-        var last = past[past.length - 1];
-        if (!last) throw new Error("no radar frames");
-        RADAR.host = j.host || "https://tilecache.rainviewer.com";
+        var last = validRadarFrame(past[past.length - 1]);
+        var host = validRadarHost(j.host || "https://tilecache.rainviewer.com");
+        if (!last || !host) throw new Error("invalid radar metadata");
+        RADAR.host = host;
         RADAR.path = last.path;
         RADAR.time = last.time;
         return RADAR;
@@ -650,16 +693,44 @@
       b.classList.toggle("on", state.radarOn);
       b.setAttribute("aria-pressed", String(state.radarOn));
     }
+    updateRadarAccessibility();
     if (map && map.getLayer("radar")) {
       map.setLayoutProperty("radar", "visibility", state.radarOn ? "visible" : "none");
     }
     renderLegend();
   }
 
+  function updateRadarAccessibility() {
+    var b = el("radar-btn");
+    if (!b) return;
+    var label = state.radarState === "fresh" ? "data fresh" :
+      state.radarState === "stale" ? "showing stale data" :
+      state.radarState === "unavailable" ? "data unavailable" : "data loading";
+    b.setAttribute("aria-label", "Weather radar " + (state.radarOn ? "on" : "off") + "; " + label + ". Toggle weather radar.");
+    b.title = "Weather radar: " + label;
+    b.setAttribute("data-radar-state", state.radarState);
+    var visible = el("radar-status-label");
+    if (visible) visible.textContent = state.radarOn ? {
+      fresh: "Fresh", stale: "Stale", unavailable: "No data", loading: "Loading",
+    }[state.radarState] || "Loading" : "Off";
+  }
+
   function refreshRadar() {
-    return loadRadarFrame().then(addRadarLayer).catch(function (e) {
+    if (radarRefreshPromise) return radarRefreshPromise;
+    state.radarState = "loading";
+    updateRadarAccessibility();
+    radarRefreshPromise = loadRadarFrame().then(function () {
+      state.radarState = radarFrameIsFresh(RADAR.time) ? "fresh" : "stale";
+      addRadarLayer();
+    }).catch(function (e) {
+      state.radarState = RADAR.path ? "stale" : "unavailable";
       console.warn("Radar unavailable:", e && e.message);
+    }).finally(function () {
+      radarRefreshPromise = null;
+      updateRadarAccessibility();
+      renderLegend();
     });
+    return radarRefreshPromise;
   }
 
   /* ---------------- hazard marker icons ---------------- */
@@ -768,18 +839,47 @@
     });
   }
   function circlePolygon(center, radiusKm) {
+    if (!Array.isArray(center) || center.length < 2 || !center.every(Number.isFinite) ||
+      center[0] < -180 || center[0] > 180 || center[1] < -90 || center[1] > 90 ||
+      !Number.isFinite(radiusKm) || radiusKm <= 0 || radiusKm > 500) return null;
     var pts = [], n = 48;
     var lat = center[1] * Math.PI / 180;
+    var cosLat = Math.max(0.15, Math.abs(Math.cos(lat)));
     for (var i = 0; i <= n; i++) {
       var brng = (i / n) * 2 * Math.PI;
       var dLat = (radiusKm / 111.32) * Math.cos(brng);
-      var dLon = (radiusKm / (111.32 * Math.cos(lat))) * Math.sin(brng);
+      var dLon = (radiusKm / (111.32 * cosLat)) * Math.sin(brng);
       pts.push([center[0] + dLon, center[1] + dLat]);
     }
     return { type: "Polygon", coordinates: [pts] };
   }
 
   var SEV_FILL = { 4: "#a32c25", 3: "#c05427", 2: "#a87b1f", 1: "#8a8374" };
+  var mapInteractionsBound = false;
+
+  function showOrganizationAtPoint(point) {
+    var hits = map.queryRenderedFeatures(point, { layers: ["org-point"] });
+    if (!hits.length) return false;
+    showOrgPopup(hits[0].properties.id);
+    return true;
+  }
+
+  function bindMapInteractions() {
+    if (mapInteractionsBound) return;
+    mapInteractionsBound = true;
+    map.on("click", "org-point", function (e) { showOrgPopup(e.features[0].properties.id); });
+    map.on("click", "org-selected-star", function (e) { showOrgPopup(e.features[0].properties.id); });
+    map.on("click", "hazard-point", function (e) {
+      if (showOrganizationAtPoint(e.point)) return;
+      var id = e.features[0].properties.id;
+      showHazardPopup(id, e.lngLat);
+      selectEvent(id, { frame: false });
+    });
+    ["org-point", "org-selected-star", "hazard-point"].forEach(function (layer) {
+      map.on("mouseenter", layer, function () { map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", layer, function () { map.getCanvas().style.cursor = ""; });
+    });
+  }
 
   function addDataLayers() {
     map.addSource("hazard-areas", { type: "geojson", data: hazardAreaGeoJSON() });
@@ -790,7 +890,8 @@
       id: "hazard-fill", type: "fill", source: "hazard-areas",
       paint: {
         "fill-color": ["match", ["get", "sev"], 4, SEV_FILL[4], 3, SEV_FILL[3], 2, SEV_FILL[2], SEV_FILL[1]],
-        "fill-opacity": ["case", ["==", ["get", "hasOrgs"], 1],
+        "fill-opacity": ["case", ["==", ["get", "matchMethod"], "estimated-radius"], 0.08,
+          ["==", ["get", "hasOrgs"], 1],
           ["match", ["get", "sev"], 4, 0.28, 3, 0.21, 0.14],
           ["==", ["get", "cwfis"], 1], 0.13,
           0.035],
@@ -798,6 +899,7 @@
     });
     map.addLayer({
       id: "hazard-line", type: "line", source: "hazard-areas",
+      filter: ["!=", ["get", "matchMethod"], "estimated-radius"],
       paint: {
         "line-color": ["match", ["get", "sev"], 4, SEV_FILL[4], 3, SEV_FILL[3], 2, SEV_FILL[2], SEV_FILL[1]],
         "line-width": ["case",
@@ -810,11 +912,20 @@
           0.15],
       },
     });
+    map.addLayer({
+      id: "hazard-estimated-line", type: "line", source: "hazard-areas",
+      filter: ["==", ["get", "matchMethod"], "estimated-radius"],
+      paint: {
+        "line-color": ["match", ["get", "sev"], 4, SEV_FILL[4], 3, SEV_FILL[3], 2, SEV_FILL[2], SEV_FILL[1]],
+        "line-width": 1.4,
+        "line-opacity": 0.75,
+        "line-dasharray": [3, 2],
+      },
+    });
 
     // The disc and white icon use the same visible group as the right-hand controls and
     // legend; severity is carried by marker size.
     map.addSource("hazard-points", { type: "geojson", data: hazardPointGeoJSON() });
-    var hazardPointLayers = ["hazard-point"];
     map.addLayer({
       id: "hazard-point", type: "circle", source: "hazard-points",
       paint: {
@@ -867,38 +978,18 @@
       },
     });
     addSelectedStarLayer();
-
-    function showOrganizationAtPoint(point) {
-      var hits = map.queryRenderedFeatures(point, { layers: ["org-point"] });
-      if (!hits.length) return false;
-      showOrgPopup(hits[0].properties.id);
-      return true;
-    }
-
-    map.on("click", "org-point", function (e) { showOrgPopup(e.features[0].properties.id); });
-    map.on("click", "org-selected-star", function (e) { showOrgPopup(e.features[0].properties.id); });
-    // Organization points are drawn above alerts. When both occupy the clicked pixels,
-    // preserve that visual priority instead of letting the alert handler replace the
-    // organization popup a moment later.
-    hazardPointLayers.forEach(function (layer) {
-      map.on("click", layer, function (e) {
-        if (showOrganizationAtPoint(e.point)) return;
-        var id = e.features[0].properties.id;
-        showHazardPopup(id, e.lngLat);
-        selectEvent(id, { frame: false });
-      });
-    });
-    ["org-point", "org-selected-star"].concat(hazardPointLayers).forEach(function (l) {
-      map.on("mouseenter", l, function () { map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", l, function () { map.getCanvas().style.cursor = ""; });
-    });
+    // Delegated map listeners survive setStyle(). Register them only once while sources
+    // and layers are recreated for each style.
+    bindMapInteractions();
   }
 
   function refreshMapData() {
     if (!map || !map.getSource("orgs")) return;
+    var started = window.performance && window.performance.now ? window.performance.now() : 0;
     map.getSource("orgs").setData(orgGeoJSON());
     map.getSource("hazard-areas").setData(hazardAreaGeoJSON());
     map.getSource("hazard-points").setData(hazardPointGeoJSON());
+    if (started) state.performanceMetrics.geojsonMs = Math.max(0, window.performance.now() - started);
   }
 
   /* ---------------- org popup ---------------- */
@@ -932,8 +1023,8 @@
     if (evs.length) {
       html += '<div class="p-events"><div class="p-events-title">Active events affecting this location</div>';
       evs.forEach(function (e) {
-        html += '<div class="p-evt" data-evt="' + esc(e.id) + '"' + (isApproxMatch(e) ? ' title="' + APPROX_TITLE + '"' : "") +
-          '><span class="sdot" style="background:' + SEV_FILL[e.severity] + '"></span><span>' + esc(e.title) + approxFlag(e) + "</span></div>";
+        html += '<button type="button" class="p-evt" data-evt="' + esc(e.id) + '"' + (isApproxMatch(e) ? ' title="' + APPROX_TITLE + '"' : "") +
+          '><span class="sdot" style="background:' + SEV_FILL[e.severity] + '"></span><span>' + esc(e.title) + approxFlag(e) + "</span></button>";
       });
       html += "</div>";
     } else {
@@ -973,7 +1064,7 @@
   // Watches are anticipatory — conditions could develop — while warnings and observed
   // events are happening now. The split powers the "needing attention" vs "watchlist"
   // views: one is outreach, the other is pre-positioning.
-  function isWatch(e) { return /\bwatch\b/i.test(e.title); }
+  function isWatch(e) { return e.responseClass === "watch"; }
   function notWatch(e) { return !isWatch(e); }
 
   // Unique organizations currently inside any visible event's footprint, each with the
@@ -1007,7 +1098,8 @@
     var evCount = visibleEvents().filter(function (e) { return notWatch(e) && e.affectedShown.length; }).length;
     if (n === 0) {
       bar.classList.add("calm");
-      bar.innerHTML = '<span class="impact-num">0</span><span class="impact-text"><b>No mapped organizations</b> are in an active hazard area right now.</span>';
+      bar.innerHTML = '<span class="impact-num">0</span><span class="impact-text"><b>No mapped organizations</b> are in an active hazard area ' +
+        (state.feedsComplete ? "right now." : "in the currently available data. Some sources are unavailable.") + "</span>";
     } else {
       bar.classList.remove("calm");
       bar.innerHTML =
@@ -1036,11 +1128,13 @@
 
     var evs = visibleEvents().slice().sort(function (a, b) { return rankScore(b) - rankScore(a); });
     el("event-count").textContent = evs.length + " active";
-    el("updated").textContent = state.updatedAt ? "Updated " + timeAgo(state.updatedAt) : "";
+    el("updated").textContent = state.feedsCheckedAt ? "Feeds checked " + timeAgo(state.feedsCheckedAt) : "";
 
     var list = el("event-list");
     if (!evs.length) {
-      list.innerHTML = '<div class="empty">No active events in the selected layers.</div>';
+      list.innerHTML = '<li class="empty">' + (state.feedsComplete
+        ? "No active events in the selected layers."
+        : "No active events in the selected layers from the currently available sources. Data is partial.") + "</li>";
       return;
     }
 
@@ -1053,7 +1147,7 @@
         ? '<div class="evt-orgs hit"><b>' + n + "</b> organization" + (n === 1 ? "" : "s") + " in the affected area" + approxFlag(e) + "</div>"
         : '<div class="evt-orgs">No mapped organizations in range</div>';
       var when = e.time ? timeAgo(e.time) : "";
-      html += '<div class="event-item" data-evt="' + esc(e.id) + '" role="listitem">' +
+      html += '<li><button type="button" class="event-item" data-evt="' + esc(e.id) + '">' +
         '<span class="evt-ic ' + m.cls + '">' + svg(m.icon) + "</span>" +
         '<span class="evt-body">' +
         '<span class="evt-title">' + esc(e.title) + "</span>" +
@@ -1061,11 +1155,11 @@
         orgLine +
         "</span>" +
         '<span class="sev-tag s' + e.severity + '">' + esc(e.sevLabel) + "</span>" +
-        "</div>";
+        "</button></li>";
     });
     if (shown.length < evs.length) {
-      html += '<button class="more-btn list-more" id="event-list-more">Show ' +
-        Math.min(EVENT_LIST_PAGE_SIZE, evs.length - shown.length) + " more of " + evs.length + " events</button>";
+      html += '<li class="list-more-row"><button class="more-btn list-more" id="event-list-more">Show ' +
+        Math.min(EVENT_LIST_PAGE_SIZE, evs.length - shown.length) + " more of " + evs.length + " events</button></li>";
     }
     list.innerHTML = html;
     list.querySelectorAll(".event-item").forEach(function (node) {
@@ -1121,7 +1215,7 @@
     var e = state.events.find(function (x) { return x.id === eventId; });
     if (!e) return;
     var m = catMeta(e.category);
-    var n = e.affected.length;
+    var n = e.affectedShown.length;
     var html = '<div class="popup haz-pop">' +
       '<div class="hp-head">' +
       '<span class="hp-ic" style="background:' + (CAT_COLOR[e.category] || CAT_COLOR.other) + '">' + svg(m.icon) + "</span>" +
@@ -1173,18 +1267,17 @@
 
     html += '<div class="detail-head"><span class="evt-ic ' + m.cls + '">' + svg(m.icon) + "</span>" +
       '<div><div class="detail-title">' + esc(e.title) + "</div>" +
-      '<div class="detail-sub">' + esc(m.label) + " &middot; " + esc(e.sevLabel) + " severity</div></div></div>";
+      '<div class="detail-sub">' + esc(m.label) + " &middot; Project screening priority: " + esc(e.screeningPriorityLabel || e.sevLabel) + "</div></div></div>";
 
     html += '<div class="kv">';
     if (e.area) html += kv("Area", esc(e.area));
-    if (e.time) html += kv("Onset", fmtTime(e.time) + " (" + timeAgo(e.time) + ")");
-    if (e.expires) html += kv("Until", fmtTime(e.expires));
+    if (e.providerSeverity) html += kv("Provider severity", esc(e.providerSeverity));
+    if (e.startedAt) html += kv("Started", fmtTime(e.startedAt) + " (" + timeAgo(e.startedAt) + ")");
+    if (e.observedAt && e.observedAt !== e.startedAt) html += kv("Observed", fmtTime(e.observedAt) + " (" + timeAgo(e.observedAt) + ")");
+    if (e.updatedAt && e.updatedAt !== e.startedAt && e.updatedAt !== e.observedAt) html += kv("Source updated", fmtTime(e.updatedAt) + " (" + timeAgo(e.updatedAt) + ")");
+    if (e.expiresAt || e.expires) html += kv("Until", fmtTime(e.expiresAt || e.expires));
     html += kv("Affected", affected.length + " mapped organization" + (affected.length === 1 ? "" : "s"));
-    if (affected.length && isApproxMatch(e)) {
-      html += kv("Match", '<span title="' + APPROX_TITLE + '">County-level (approximate)</span>');
-    } else if (e.zoneUpgraded) {
-      html += kv("Match", '<span title="Organizations are matched against the exact warned-zone outline published for this alert.">Warned-zone outline</span>');
-    }
+    html += kv("Match method", '<span' + (isApproxMatch(e) ? ' title="' + APPROX_TITLE + '"' : "") + ">" + esc(matchMethodLabel(e)) + "</span>");
     html += kv("Source", esc(e.source));
     html += "</div>";
 
@@ -1201,13 +1294,13 @@
       html += '<div class="affected-head"><span>Organizations in the affected area</span>' +
         '<button class="export-btn" id="detail-export">' + downloadIcon() + "Export CSV</button></div>";
       affected.forEach(function (o) {
-        html += '<div class="org-row" data-org="' + esc(o.id) + '">' +
+        html += '<button type="button" class="org-row" data-org="' + esc(o.id) + '">' +
           '<span class="org-dot" style="background:' + TYPE_COLOR[o.type] + '"></span>' +
           '<span class="org-name">' + esc(o.name) + "</span>" +
-          '<span class="org-city">' + esc(o.city) + ", " + esc(o.region) + "</span></div>";
+          '<span class="org-city">' + esc(o.city) + ", " + esc(o.region) + "</span></button>";
       });
     } else {
-      html += '<div class="p-none" style="margin-top:16px">No mapped organizations fall inside this event’s footprint. In production, the full 47,000-location dataset would surface smaller institutions here.</div>';
+      html += '<div class="p-none" style="margin-top:16px">No organizations in this non-exhaustive prototype dataset matched this event. This does not mean that no cultural heritage organizations are at risk.</div>';
     }
 
     d.innerHTML = html;
@@ -1256,14 +1349,25 @@
     return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
   }
   function exportOrgs(entries, basename) {
-    var header = ["Name", "Type", "City", "State/Region", "Country", "Lat", "Lon", "Website", "FIPS", "On your list", "Active hazards"];
+    var header = [
+      "Name", "Type", "City", "State/Region", "Country", "Lat", "Lon", "Website", "FIPS", "On your list",
+      "Active hazards", "Match methods", "Project screening priorities", "Provider severities", "Started", "Observed", "Source updated",
+      "Feeds complete", "Feeds checked", "Data as of", "Unavailable sources",
+    ];
     var rows = [header];
     entries.slice().sort(function (a, b) { return a.org.name.localeCompare(b.org.name); }).forEach(function (x) {
       var haz = x.events.map(function (e) { return e.title; }).join("; ");
+      var methods = x.events.map(matchMethodLabel).join("; ");
+      var priorities = x.events.map(function (e) { return e.screeningPriorityLabel || e.sevLabel; }).join("; ");
+      var providerSeverities = x.events.map(function (e) { return e.providerSeverity || "not supplied"; }).join("; ");
       rows.push([
         x.org.name, x.org.type, x.org.city, x.org.region,
         COUNTRY_LABEL[x.org.country] || x.org.country, x.org.lat, x.org.lon,
-        x.org.url || "", x.org.fips || "", x.org.selected ? "yes" : "", haz,
+        x.org.url || "", x.org.fips || "", x.org.selected ? "yes" : "", haz, methods, priorities, providerSeverities,
+        x.events.map(function (e) { return e.startedAt || ""; }).join("; "),
+        x.events.map(function (e) { return e.observedAt || ""; }).join("; "),
+        x.events.map(function (e) { return e.updatedAt || ""; }).join("; "),
+        state.feedsComplete ? "yes" : "no", state.feedsCheckedAt || "", state.dataAsOf || "", state.unavailableFeeds.join("; "),
       ]);
     });
     var csv = rows.map(function (r) { return r.map(csvCell).join(","); }).join("\r\n");
@@ -1317,8 +1421,8 @@
     if (!entries.length) {
       html += '<div class="p-none" style="margin-top:18px">' +
         (mode === "watch"
-          ? "No mapped organizations are currently inside a watch area in the selected layers."
-          : "No mapped organizations are currently inside an active hazard footprint in the selected layers.") + "</div>";
+          ? (state.feedsComplete ? "No mapped organizations are currently inside a watch area in the selected layers." : "No mapped organizations are inside a watch area in the available data. Some sources are unavailable.")
+          : (state.feedsComplete ? "No mapped organizations are currently inside an active hazard footprint in the selected layers." : "No mapped organizations are inside an active hazard footprint in the available data. Some sources are unavailable.")) + "</div>";
     }
     keys.forEach(function (k, ki) {
       var list = groups[k].slice().sort(function (a, b) { return b.events.length - a.events.length || a.org.name.localeCompare(b.org.name); });
@@ -1326,11 +1430,11 @@
         '<button class="export-btn draft-btn" data-ri="' + ki + '">' + mailIcon() + "Draft outreach</button></div>";
       list.forEach(function (x) {
         var top = x.events.slice().sort(function (a, b) { return b.severity - a.severity; })[0];
-        html += '<div class="org-row" data-org="' + esc(x.org.id) + '">' +
+        html += '<button type="button" class="org-row" data-org="' + esc(x.org.id) + '">' +
           '<span class="org-dot" style="background:' + TYPE_COLOR[x.org.type] + '"></span>' +
           '<span class="org-name">' + esc(x.org.name) +
           ' <span style="color:var(--ink-3);font-size:11.5px">: ' + esc(top.title) + (x.events.length > 1 ? " +" + (x.events.length - 1) : "") + "</span></span>" +
-          '<span class="org-city">' + esc(x.org.city) + "</span></div>";
+          '<span class="org-city">' + esc(x.org.city) + "</span></button>";
       });
     });
     v.innerHTML = mode === "watch" ? html.replace(/\s*—\s*/g, ": ") : html;
@@ -1448,7 +1552,7 @@
       '<div class="legend-body" id="legend-body"' + (state.legendCollapsed ? " hidden" : "") + '>' +
       (hazRows
         ? '<div class="legend-title">Hazards on the map</div>' + hazRows +
-          '<div class="legend-note">Each marker is one alert; bigger means more severe. Shaded patches are official alert boundaries where an agency published one.</div>'
+          '<div class="legend-note">Each marker is one event; bigger means a higher project screening priority. Solid areas use a published boundary or official warned zone. Dashed circles are project-estimated screening radii.</div>'
         : '<div class="legend-title">Hazards on the map</div><div class="legend-note" style="border:0;padding-top:0">No active hazards in the selected layers.</div>') +
 
       '<div class="legend-title" style="margin-top:8px">Organizations</div>' +
@@ -1460,8 +1564,8 @@
       (state.radarOn
         ? '<div class="legend-title" style="margin-top:8px">Weather radar</div>' +
           '<div class="legend-row"><span class="radar-scale"></span></div>' +
-          '<div class="legend-note" style="border:0;padding-top:2px">Live precipitation, light to heavy. ' +
-          (RADAR.time ? "Updated " + timeAgo(new Date(RADAR.time * 1000).toISOString()) + "." : "") + "</div>"
+          '<div class="legend-note" style="border:0;padding-top:2px">Precipitation, light to heavy. Radar data is ' + esc(state.radarState) + ". " +
+          (RADAR.time ? "Frame observed " + timeAgo(new Date(RADAR.time * 1000).toISOString()) + "." : "No frame is available.") + "</div>"
         : "") +
 
       (quiet
@@ -1506,10 +1610,6 @@
     });
     return n;
   }
-  function legendRow(kind, color, label) {
-    return '<div class="legend-row"><span class="swatch ' + (kind === "area" ? "area" : "") + '" style="background:' + color + '"></span>' + label + "</div>";
-  }
-
   function buildFilters() {
     // Guard against the failure above ever recurring silently.
     Object.keys(LAYER_GROUPS).forEach(function (g) {
@@ -1577,11 +1677,34 @@
   /* ---------------- search ---------------- */
 
   function setupSearch() {
-    var input = el("search"), box = el("search-results"), active = -1, matches = [];
-    function close() { box.hidden = true; active = -1; }
+    var input = el("search"), box = el("search-results"), status = el("search-status"), active = -1, matches = [];
+    function close() {
+      box.hidden = true;
+      active = -1;
+      input.setAttribute("aria-expanded", "false");
+      input.removeAttribute("aria-activedescendant");
+    }
+    function open() {
+      box.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    }
+    function updateActive(items) {
+      items.forEach(function (node, i) {
+        var selected = i === active;
+        node.classList.toggle("active", selected);
+        node.setAttribute("aria-selected", String(selected));
+        if (selected) {
+          input.setAttribute("aria-activedescendant", node.id);
+          if (node.scrollIntoView) node.scrollIntoView({ block: "nearest" });
+        }
+      });
+      if (active < 0) input.removeAttribute("aria-activedescendant");
+    }
     function run() {
       var q = input.value.trim().toLowerCase();
-      if (q.length < 2) { close(); return; }
+      active = -1;
+      input.removeAttribute("aria-activedescendant");
+      if (q.length < 2) { matches = []; status.textContent = ""; close(); return; }
       matches = ORGS.filter(function (o) {
         return orgShown(o) && (o.name.toLowerCase().indexOf(q) !== -1 ||
           o.city.toLowerCase().indexOf(q) !== -1 ||
@@ -1599,18 +1722,20 @@
       });
       if (!matches.length) {
         box.innerHTML = '<div class="sr-empty">No institution, city, or state matches “' + esc(input.value) + '”</div>';
-        box.hidden = false; return;
+        status.textContent = "No matches.";
+        open(); return;
       }
       var shown = matches.slice(0, 8);
       var typeHint = /^(library|libraries|museum|museums|archive|archives)$/.test(q);
       box.innerHTML = (matches.length > 1
-        ? '<div class="sr-item sr-all" data-action="all" role="option"><div class="sr-name">Show all ' + matches.length + ' matches</div>' +
+        ? '<div class="sr-item sr-all" id="search-option-all" data-action="all" role="option" aria-selected="false"><div class="sr-name">Show all ' + matches.length + ' matches</div>' +
           '<div class="sr-meta">' + (typeHint ? "For all organizations of this type, use the filter buttons." : "Center every matching institution on the map.") + '</div></div>'
         : "") + shown.map(function (o, i) {
-        return '<div class="sr-item" data-i="' + i + '" role="option"><div class="sr-name">' + esc(o.name) + "</div>" +
+        return '<div class="sr-item" id="search-option-' + i + '" data-i="' + i + '" role="option" aria-selected="false"><div class="sr-name">' + esc(o.name) + "</div>" +
           '<div class="sr-meta">' + esc(orgTypeLabel(o)) + " &middot; " + esc(o.city) + ", " + esc(o.region) + "</div></div>";
       }).join("");
-      box.hidden = false;
+      status.textContent = matches.length + " match" + (matches.length === 1 ? "" : "es") + ".";
+      open();
       box.querySelectorAll(".sr-item").forEach(function (node) {
         node.addEventListener("click", function () { activate(node, shown); });
       });
@@ -1620,6 +1745,7 @@
       else pick(shown[+node.getAttribute("data-i")]);
     }
     function frame(orgs) {
+      if (!orgs || !orgs.length) return;
       if (orgs.length === 1) { pick(orgs[0]); return; }
       prepareMapForNavigation();
       input.value = "";
@@ -1645,16 +1771,17 @@
     input.addEventListener("keydown", function (e) {
       if (box.hidden) return;
       var items = box.querySelectorAll(".sr-item");
+      if (!items.length && e.key === "Enter") { e.preventDefault(); return; }
       if (e.key === "ArrowDown") { e.preventDefault(); active = Math.min(active + 1, items.length - 1); }
       else if (e.key === "ArrowUp") { e.preventDefault(); active = Math.max(active - 1, 0); }
       else if (e.key === "Enter") {
         e.preventDefault();
         if (active >= 0 && items[active]) activate(items[active], matches.slice(0, 8));
-        else frame(matches);
+        else if (matches.length) frame(matches);
         return;
       }
       else if (e.key === "Escape") { close(); return; }
-      items.forEach(function (n, i) { n.classList.toggle("active", i === active); });
+      updateActive(items);
     });
     document.addEventListener("click", function (e) {
       if (!el("search-wrap").contains(e.target)) close();
@@ -1674,14 +1801,39 @@
   }
 
   function setFeedStatus(states) {
-    el("feed-status").innerHTML = Feeds.sources.map(function (s) {
+    var loaded = 0, pending = 0, stale = [], failed = [];
+    var dots = Feeds.sources.map(function (s) {
       var info = states[s.id] || { status: "pending" };
       var status = typeof info === "string" ? info : info.status;
+      if (status === "ok") loaded++;
+      else if (status === "pending") pending++;
+      else if (status === "stale") stale.push(s.name);
+      else failed.push(s.name);
       var detail = status;
       if (info.lastSuccess) detail += " — last loaded " + timeAgo(info.lastSuccess);
       if (info.reason) detail += " — " + info.reason;
-      return '<span class="dot ' + status + '" title="' + esc(s.name) + ': ' + esc(detail) + '"></span>';
+      return '<span class="dot ' + status + '" aria-hidden="true" title="' + esc(s.name) + ': ' + esc(detail) + '"></span>';
     }).join("");
+    var summary = pending
+      ? "Live feeds loading. " + loaded + " of " + Feeds.sources.length + " loaded."
+      : loaded + " of " + Feeds.sources.length + " live data sources fresh" +
+        (stale.length ? "; stale cached data: " + stale.join(", ") : "") +
+        (failed.length ? "; unavailable: " + failed.join(", ") : "") + ".";
+    el("feed-status").innerHTML = '<span class="sr-only">' + esc(summary) + "</span>" + dots;
+    var btn = el("refresh-btn");
+    if (btn) btn.setAttribute("aria-label", "Refresh feeds. " + summary);
+    var indicator = el("feed-summary-indicator");
+    if (indicator) {
+      indicator.className = "dot feed-summary-indicator " + (pending ? "pending" : failed.length ? "fail" : stale.length ? "stale" : "ok");
+    }
+  }
+
+  function renderFeedWarning() {
+    var warning = el("feed-warning");
+    if (!warning) return;
+    warning.hidden = state.feedsComplete || !state.feedsCheckedAt;
+    warning.textContent = warning.hidden ? "" : "Partial data: " + state.unavailableFeeds.length + " of " +
+      Feeds.sources.length + " sources unavailable or stale. Counts, exports, briefs, and trends may be incomplete.";
   }
 
   /* ---------------- NWS warned-zone polygon upgrade ---------------- */
@@ -1689,20 +1841,24 @@
   // Most NWS alerts arrive with no polygon, only county codes, and a county is often far
   // larger than the warned zone: a Fire Weather Watch for the Cascade slopes lists every
   // county the zone touches, so a valley-floor library 90 miles away lights up. For
-  // county-matched alerts that touch mapped organizations, fetch the alert's real zone
-  // polygons (its affectedZones URLs on api.weather.gov), cache them, and upgrade the
-  // event to exact point-in-polygon matching. Until the polygons arrive, or if the fetch
-  // fails, the match stays county-level and is labeled approximate in the UI.
-  var ZONE_LS = "hw-zone-geoms";
+  // county-matched alerts that touch public demonstration organizations, fetch the alert's
+  // real zone polygons (its affectedZones URLs on api.weather.gov), cache them, and upgrade
+  // the event to exact point-in-polygon matching. Private uploads never schedule these
+  // requests. Until the polygons arrive, or if the fetch fails, the match stays county-level
+  // and is labeled approximate in the UI.
+  var ZONE_LS = "hw-zone-geoms-v2";
+  var LEGACY_ZONE_LS = "hw-zone-geoms";
   var ZONE_TTL_MS = 30 * 24 * 60 * 60 * 1000; // zone boundaries are near-static
   var ZONE_MAX_STORED = 80; // stay well under the localStorage quota
   var ZONE_MAX_ENTRY_CHARS = 300000; // keep single monster coastal zones out of storage
   var ZONE_FETCH_CONCURRENCY = 4;
+  var ZONE_FETCH_MAX_PER_REFRESH = 40;
   var ZONE_FETCH_MAX_BYTES = 8 * 1024 * 1024;
   var ZONE_RETRY_MS = 10 * 60 * 1000;
   var zoneMem = null; // zone key -> GeoJSON geometry
   var zoneAt = {}; // zone key -> time cached, for age-based pruning
   var zoneFailedAt = {}; // zone key -> last failed fetch, to pace retries
+  var zoneInFlight = {}; // zone key -> true while a request is active
 
   // Forecast and fire zones can share an id (ORZ011 names two different shapes), so the
   // cache key keeps the zone type from the URL path.
@@ -1716,10 +1872,16 @@
     zoneMem = {};
     var now = Date.now();
     try {
+      // Version 1 could contain public zone geometry fetched because of a private-list
+      // match. Discard it once so old local state cannot preserve that side channel.
+      localStorage.removeItem(LEGACY_ZONE_LS);
       var raw = JSON.parse(localStorage.getItem(ZONE_LS) || "{}");
       Object.keys(raw).forEach(function (k) {
         var entry = raw[k];
-        if (entry && entry.g && now - (entry.t || 0) < ZONE_TTL_MS) { zoneMem[k] = entry.g; zoneAt[k] = entry.t; }
+        if (entry && entry.g && now - (entry.t || 0) < ZONE_TTL_MS &&
+          JSON.stringify(entry.g).length <= ZONE_MAX_ENTRY_CHARS && Feeds.geometryIsUsable(entry.g)) {
+          zoneMem[k] = entry.g; zoneAt[k] = entry.t;
+        }
       });
     } catch (e) {}
   }
@@ -1729,7 +1891,9 @@
     for (var attempt = 0; attempt < 2; attempt++) {
       var raw = {};
       keys.slice(0, attempt ? Math.floor(ZONE_MAX_STORED / 2) : ZONE_MAX_STORED).forEach(function (k) {
-        if (JSON.stringify(zoneMem[k]).length <= ZONE_MAX_ENTRY_CHARS) raw[k] = { g: zoneMem[k], t: zoneAt[k] || Date.now() };
+        if (Feeds.geometryIsUsable(zoneMem[k]) && JSON.stringify(zoneMem[k]).length <= ZONE_MAX_ENTRY_CHARS) {
+          raw[k] = { g: zoneMem[k], t: zoneAt[k] || Date.now() };
+        }
       });
       try { localStorage.setItem(ZONE_LS, JSON.stringify(raw)); return; } catch (e) {}
     }
@@ -1747,13 +1911,15 @@
       else if (g.type === "MultiPolygon") polys = polys.concat(g.coordinates);
       else return null;
     }
-    return polys.length ? { type: "MultiPolygon", coordinates: polys } : null;
+    var merged = polys.length ? { type: "MultiPolygon", coordinates: polys } : null;
+    return merged && Feeds.geometryIsUsable(merged) ? merged : null;
   }
 
   function applyZoneGeometry(e, keys) {
     var merged = mergeZoneGeometries(keys.map(function (k) { return zoneMem[k]; }));
     if (!merged) return false;
     e.geometry = merged;
+    e.matchMethod = "official-zone";
     e._bbox = null; // computeImpact rebuilds it from the new polygons
     e.zoneUpgraded = true;
     return true;
@@ -1765,13 +1931,26 @@
     return !e.geometry && !!(e.fips && e.fips.length);
   }
 
+  function matchMethodLabel(e) {
+    var method = e.matchMethod || (isApproxMatch(e) ? "county-approximate" : "unknown");
+    return {
+      "published-polygon": "Published boundary",
+      "official-zone": "Official warned zone",
+      "county-approximate": "County-level approximation",
+      "estimated-radius": "Project-estimated radius",
+      unknown: "Unavailable",
+    }[method] || "Unavailable";
+  }
+
   var APPROX_TITLE = "Matched by county: this alert lists whole counties and its exact warned-zone outline has not loaded yet, so some organizations may sit outside the warned zone.";
   function approxFlag(e) {
     return isApproxMatch(e) ? ' <span class="approx-flag" title="' + APPROX_TITLE + '">county-level</span>' : "";
   }
 
   function eventZoneKeys(e) {
-    if (e.feed !== "nws" || e.geometry || !e.zones || !e.zones.length) return null;
+    // A bounded subset is retained for diagnostics, but it must never replace the county
+    // fallback as though it represented the provider's complete warned area.
+    if (e.feed !== "nws" || e.geometry || e.zonesTruncated || !e.zones || !e.zones.length) return null;
     var keys = [];
     for (var i = 0; i < e.zones.length; i++) {
       var k = zoneKey(e.zones[i]);
@@ -1781,44 +1960,60 @@
     return keys;
   }
 
+  function eventPublicAffectedCount(e) {
+    return (e.affected || []).reduce(function (count, id) {
+      var org = orgById[id];
+      return count + (org && !org.selected ? 1 : 0);
+    }, 0);
+  }
+
+  function zoneFetchPriority(a, b) {
+    return eventPublicAffectedCount(b) - eventPublicAffectedCount(a) ||
+      (b.severity || 0) - (a.severity || 0) ||
+      String(a.id || "").localeCompare(String(b.id || ""));
+  }
+
   // Cache pass, run before impact matching, so already-known zones upgrade their alerts
   // in the same paint at no network cost.
   function applyCachedZonePolygons() {
     loadZoneStore();
-    state.events.forEach(function (e) {
+    state.events.slice().sort(zoneFetchPriority).forEach(function (e) {
       var keys = eventZoneKeys(e);
       if (keys && keys.every(function (k) { return zoneMem[k]; })) applyZoneGeometry(e, keys);
     });
   }
 
-  // Fetch pass, run after impact matching: only alerts currently claiming mapped
-  // organizations are worth network requests. Results land in the cache, so follow-up
-  // passes and the next 5-minute refresh apply them synchronously.
+  // Fetch pass, run after impact matching: only alerts currently claiming public demo
+  // organizations can schedule requests. This keeps private-list contents from changing
+  // outbound traffic or shared event refinement state. Results land in the cache, so
+  // follow-up passes and the next 5-minute refresh apply them synchronously.
   function fetchMissingZonePolygons(generation) {
     if (!zoneMem) loadZoneStore();
     var queue = {};
     var now = Date.now();
-    state.events.forEach(function (e) {
+    state.events.slice().sort(zoneFetchPriority).forEach(function (e) {
       var keys = eventZoneKeys(e);
-      if (!keys || !e.affected || !e.affected.length) return;
+      if (!keys || !eventPublicAffectedCount(e)) return;
       keys.forEach(function (k, i) {
-        if (!zoneMem[k] && now - (zoneFailedAt[k] || 0) > ZONE_RETRY_MS) queue[k] = e.zones[i];
+        if (!zoneMem[k] && !zoneInFlight[k] && now - (zoneFailedAt[k] || 0) > ZONE_RETRY_MS) queue[k] = e.zones[i];
       });
     });
-    var pending = Object.keys(queue);
+    var pending = Object.keys(queue).slice(0, ZONE_FETCH_MAX_PER_REFRESH);
     if (!pending.length) return;
     var idx = 0;
     function worker() {
       if (idx >= pending.length) return Promise.resolve();
       var key = pending[idx++];
+      zoneInFlight[key] = true;
       return Feeds.fetchJSON(queue[key], 20000, ZONE_FETCH_MAX_BYTES)
         .then(function (data) {
           var g = data && data.geometry;
-          if (!g || (g.type !== "Polygon" && g.type !== "MultiPolygon")) throw new Error("zone has no polygon");
+          if (!Feeds.geometryIsUsable(g) || JSON.stringify(g).length > ZONE_MAX_ENTRY_CHARS) throw new Error("zone has no usable bounded polygon");
           zoneMem[key] = g;
           zoneAt[key] = Date.now();
         })
         .catch(function () { zoneFailedAt[key] = Date.now(); })
+        .finally(function () { delete zoneInFlight[key]; })
         .then(worker);
     }
     var workers = [];
@@ -1838,6 +2033,7 @@
   // Redraw the map and whichever panel view is open after anything that changes which
   // organizations count as affected (zone upgrades, the My-list-only toggle).
   function rerenderImpactViews() {
+    if (popup) popup.remove();
     refreshMapData();
     renderLegend();
     var sel = state.selectedEventId && state.events.find(function (e) { return e.id === state.selectedEventId; });
@@ -1850,6 +2046,9 @@
   // covered organizations, so impact recomputes and every surface re-renders.
   function afterZoneUpgrade() {
     computeImpact();
+    if (state.feedsComplete && currentHistoryPointTime) {
+      renderTrend(reviseCurrentHistory(publicHistoryAffectedCount()), true);
+    }
     rerenderImpactViews();
   }
 
@@ -1870,6 +2069,9 @@
   }
 
   function computeImpact() {
+    if (popup) popup.remove();
+    var started = window.performance && window.performance.now ? window.performance.now() : 0;
+    var candidateChecks = 0;
     ORGS.forEach(function (o) { o._affected = false; });
     state.events.forEach(function (e) {
       e.affected = [];
@@ -1878,11 +2080,17 @@
         var b = geomBounds(e.geometry);
         e._bbox = b ? [b[0][0], b[0][1], b[1][0], b[1][1]] : null;
       }
-      candidateOrganizations(e).forEach(function (o) {
+      var candidates = candidateOrganizations(e);
+      candidateChecks += candidates.length;
+      candidates.forEach(function (o) {
         if (orgInEvent(o, e)) { e.affected.push(o.id); o._affected = true; }
       });
     });
     refreshShownAffected();
+    state.performanceMetrics.impactMs = started ? Math.max(0, window.performance.now() - started) : 0;
+    state.performanceMetrics.eventCount = state.events.length;
+    state.performanceMetrics.organizationCount = ORGS.length;
+    state.performanceMetrics.candidateChecks = candidateChecks;
   }
 
   function loadFeeds() {
@@ -1909,13 +2117,14 @@
           statuses[s.id] = {
             status: feedCache[s.id] ? "stale" : "fail",
             lastSuccess: feedCache[s.id] && feedCache[s.id].lastSuccess,
+            reason: String((err && err.message) || "source unavailable").slice(0, 160),
           };
           console.warn("Feed failed:", s.id, err && err.message);
         })
         .finally(function () { if (generation === feedGeneration) setFeedStatus(statuses); });
     });
 
-    Promise.allSettled(jobs).then(function () {
+    return Promise.allSettled(jobs).then(function () {
       if (generation !== feedGeneration) return;
       var all = [];
       var now = Date.now();
@@ -1933,18 +2142,31 @@
       var byId = {};
       all.forEach(function (e) { byId[e.id] = e; });
       state.events = Object.keys(byId).map(function (k) { return byId[k]; });
+      state.feedsCheckedAt = new Date(now).toISOString();
+      state.feedStates = statuses;
+      state.unavailableFeeds = Feeds.sources.filter(function (s) {
+        return !statuses[s.id] || statuses[s.id].status !== "ok";
+      }).map(function (s) { return s.name; });
+      state.feedsComplete = state.unavailableFeeds.length === 0;
       // Report the oldest contributing source success. Showing the newest one made the
       // whole application look current while a different source was stale.
-      state.updatedAt = Feeds.sources.reduce(function (oldest, s) {
+      state.dataAsOf = Feeds.sources.reduce(function (oldest, s) {
         var cached = feedCache[s.id];
         var loaded = cached && now - new Date(cached.lastSuccess).getTime() <= FEED_STALE_TTL_MS ? cached.lastSuccess : null;
         return loaded && (!oldest || loaded < oldest) ? loaded : oldest;
       }, null);
+      state.updatedAt = state.dataAsOf;
       applyCachedZonePolygons();
       computeImpact();
       refreshMapData();
-      renderTrend(recordHistory(affectedIndex(notWatch, true).length));
+      if (state.feedsComplete) {
+        renderTrend(recordHistory(publicHistoryAffectedCount()), true);
+      } else {
+        currentHistoryPointTime = 0;
+        renderTrend(loadHistory(), false);
+      }
       renderLegend();
+      renderFeedWarning();
       refreshRadar();
       var sel = state.selectedEventId && state.events.find(function (e) { return e.id === state.selectedEventId; });
       if (state.panelMode === "affected") {
@@ -2008,20 +2230,45 @@
 
   /* ---------------- history: 24-hour impact trend ---------------- */
 
-  var HIST_LS = "hw-history";
+  var HIST_LS = "hw-history-v2";
+  var currentHistoryPointTime = 0;
 
-  function recordHistory(nowCount) {
+  function loadHistory() {
     var arr = [];
     try { arr = JSON.parse(localStorage.getItem(HIST_LS) || "[]"); } catch (e) {}
-    if (!Array.isArray(arr)) arr = [];
-    arr.push({ t: Date.now(), a: nowCount });
+    if (!Array.isArray(arr)) return [];
     var cutoff = Date.now() - 24 * 3600 * 1000;
-    arr = arr.filter(function (p) { return p && p.t >= cutoff; }).slice(-400);
+    return arr.filter(function (p) {
+      return p && p.complete === true && Number.isFinite(p.t) && Number.isFinite(p.a) && p.t >= cutoff;
+    }).slice(-400);
+  }
+
+  function recordHistory(nowCount) {
+    var arr = loadHistory();
+    currentHistoryPointTime = Date.now();
+    arr.push({ t: currentHistoryPointTime, a: nowCount, complete: true });
     try { localStorage.setItem(HIST_LS, JSON.stringify(arr)); } catch (e) {}
     return arr;
   }
 
-  function renderTrend(arr) {
+  function publicHistoryAffectedCount() {
+    return affectedIndex(notWatch, true, true).filter(function (entry) { return !entry.org.selected; }).length;
+  }
+
+  function reviseCurrentHistory(nowCount) {
+    var arr = loadHistory();
+    if (!currentHistoryPointTime) return arr;
+    for (var i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].t === currentHistoryPointTime) {
+        arr[i].a = nowCount;
+        break;
+      }
+    }
+    try { localStorage.setItem(HIST_LS, JSON.stringify(arr)); } catch (e) {}
+    return arr;
+  }
+
+  function renderTrend(arr, currentIsComplete) {
     var t = el("trend");
     if (!t) return;
     if (!arr || arr.length < 2) { t.innerHTML = ""; t.removeAttribute("title"); return; }
@@ -2034,7 +2281,8 @@
       return x.toFixed(1) + "," + y.toFixed(1);
     }).join(" ");
     t.innerHTML = '<svg viewBox="0 0 ' + w + " " + h + '" width="' + w + '" height="' + h + '" aria-hidden="true"><polyline points="' + pts + '" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>';
-    t.title = "Organizations in active hazard areas, last 24 h — now " + arr[arr.length - 1].a + ", peak " + max;
+    t.title = "Public-dataset organizations in active hazard areas, last 24 h; " +
+      (currentIsComplete ? "current complete refresh " : "last complete refresh ") + arr[arr.length - 1].a + ", peak " + max;
   }
 
   /* ---------------- situation brief ---------------- */
@@ -2071,10 +2319,13 @@
     }
 
     var evRows = evs.slice(0, 25).map(function (e) {
-      return '<tr><td>' + esc(e.title) + '</td><td class="sev s' + e.severity + '">' + esc(e.sevLabel) + "</td><td>" +
-        esc(String(e.area || "").slice(0, 70)) + '</td><td class="num">' + e.affectedShown.length + "</td><td>" +
-        (e.expires ? esc(fmtTime(e.expires)) : "Not listed") + "</td></tr>";
+      return '<tr><td>' + esc(e.title) + '</td><td class="sev s' + e.severity + '">' + esc(e.screeningPriorityLabel || e.sevLabel) + "</td><td>" +
+        esc(e.providerSeverity || "Not supplied") + "</td><td>" + esc(matchMethodLabel(e)) + '</td><td class="num">' +
+        e.affectedShown.length + "</td><td>" + (e.updatedAt ? esc(fmtTime(e.updatedAt)) : "Not listed") + "</td></tr>";
     }).join("");
+    var partialNote = state.feedsComplete ? "" : '<p class="partial"><b>Partial data:</b> ' +
+      state.unavailableFeeds.length + " of " + Feeds.sources.length + " sources were unavailable or stale. Counts and lists may be incomplete. Affected sources: " +
+      esc(state.unavailableFeeds.join(", ")) + ".</p>";
 
     var html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Cultural Heritage Resilience: Situation Brief</title><style>" +
       "body{font:13px/1.5 'Iowan Old Style','Palatino Linotype',Palatino,Georgia,serif;color:#201d18;background:#fff;max-width:800px;margin:32px auto;padding:0 24px}" +
@@ -2089,14 +2340,17 @@
       ".sev{white-space:nowrap;font-weight:600}.s4{color:#a32c25}.s3{color:#c05427}.s2{color:#a87b1f}.s1{color:#8a8374}.num{text-align:left;font-variant-numeric:tabular-nums}" +
       ".mem{font-size:10px;color:#8c2f24;border:1px solid #8c2f24;border-radius:3px;padding:0 4px;font-family:-apple-system,'Segoe UI',sans-serif}" +
       ".none{color:#5f584b;font-style:italic}" +
+      ".partial{padding:8px 10px;background:#fff4d6;border:1px solid #d6b66b;color:#5d4612}" +
       ".foot{margin-top:30px;padding-top:10px;border-top:1px solid #cdc7b7;font-size:11px;color:#5f584b}" +
       ".noprint{margin:18px 0;font:13px -apple-system,'Segoe UI',sans-serif;color:#5f584b}" +
       "@media print{.noprint{display:none}body{margin:0}}" +
       "</style></head><body>" +
       '<div class="masthead"><span class="mark"></span><div><h1>Cultural Heritage Resilience: Situation Brief</h1>' +
       '<p class="sub">Generated ' + esc(gen.toLocaleString(undefined, { weekday: "long", month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })) +
-      (state.updatedAt ? " · live data updated " + esc(timeAgo(state.updatedAt)) : "") + "</p></div></div>" +
+      (state.feedsCheckedAt ? " · feeds checked " + esc(timeAgo(state.feedsCheckedAt)) : "") +
+      (state.dataAsOf ? " · contributing data as of " + esc(fmtTime(state.dataAsOf)) : "") + "</p></div></div>" +
       '<div class="noprint">Use your browser’s Print command to print or save this brief as a PDF.</div>' +
+      partialNote +
       '<div class="keyrow">' +
       '<div class="key"><b>' + (state.onlySelected ? picked : ORGS.length) + "</b><span>organizations monitored" +
       (state.onlySelected ? " (your uploaded list only)" : picked ? " (" + picked + " on your list)" : "") + "</span></div>" +
@@ -2104,10 +2358,10 @@
       '<div class="key"><b>' + nowIdx.length + "</b><span>needing attention now</span></div>" +
       '<div class="key"><b>' + watchIdx.length + "</b><span>on the watchlist</span></div>" +
       "</div>" +
-      "<h2>Needing attention now</h2>" + groupTables(nowIdx, "No mapped organizations are inside an active hazard footprint.") +
-      "<h2>Watchlist: potential impacts</h2>" + groupTables(watchIdx, "No mapped organizations are inside a watch area.") +
+      "<h2>Needing attention now</h2>" + groupTables(nowIdx, state.feedsComplete ? "No mapped organizations are inside an active hazard footprint." : "No mapped organizations are inside an active hazard footprint in the available data; sources are missing.") +
+      "<h2>Watchlist: potential impacts</h2>" + groupTables(watchIdx, state.feedsComplete ? "No mapped organizations are inside a watch area." : "No mapped organizations are inside a watch area in the available data; sources are missing.") +
       "<h2>Most significant active events</h2>" +
-      (evRows ? "<table><thead><tr><th>Event</th><th>Severity</th><th>Area</th><th>Orgs</th><th>Until</th></tr></thead><tbody>" + evRows + "</tbody></table>" : '<p class="none">No active events.</p>') +
+      (evRows ? "<table><thead><tr><th>Event</th><th>Project priority</th><th>Provider severity</th><th>Match method</th><th>Orgs</th><th>Source updated</th></tr></thead><tbody>" + evRows + "</tbody></table>" : '<p class="none">No active events in the available data.</p>') +
       '<div class="foot">Sources: National Weather Service, Environment and Climate Change Canada, USGS, NIFC/WFIGS, Natural Resources Canada (CWFIS), NASA EONET. ' +
       "For situational awareness only; this is not an emergency alerting system. Always follow official guidance from local authorities.</div>" +
       "</body></html>";
@@ -2228,6 +2482,7 @@
   }
 
   function selectionChanged() {
+    privateListGeneration++;
     rebuildOrgs();
     // Removing the list while "My list only" is on would otherwise blank the map.
     if (state.onlySelected && !ORGS.some(function (o) { return o.selected; })) {
@@ -2236,15 +2491,13 @@
     }
     renderStats();
     computeImpact();
-    // An uploaded list can put organizations in counties whose alerts were not worth
-    // zone fetches before; resolve those now rather than waiting for the next refresh.
-    fetchMissingZonePolygons(feedGeneration);
-    renderLegend();
-    refreshMapData();
-    if (state.panelMode === "affected") showAffected(state.affectedMode);
-    else if (state.panelMode === "list") renderList();
+    rerenderImpactViews();
     refreshSelectButton();
-    try { window.dispatchEvent(new CustomEvent("hw:selected-list-changed", { detail: { count: selectedCount() } })); } catch (e) {}
+    try {
+      window.dispatchEvent(new CustomEvent("hw:selected-list-changed", {
+        detail: { count: selectedCount(), generation: privateListGeneration },
+      }));
+    } catch (e) {}
   }
 
   function selectedCount() {
@@ -2321,9 +2574,17 @@
     return {
       id: e.id, title: e.title, category: e.category, hazard: catMeta(e.category).label,
       severity: e.severity, severityLabel: e.sevLabel, area: e.area || "",
+      screeningPriority: e.screeningPriority || e.severity,
+      screeningPriorityLabel: e.screeningPriorityLabel || e.sevLabel,
+      providerSeverity: e.providerSeverity || null,
+      responseClass: e.responseClass || "unknown",
       affectedCount: assistantAffectedCount(e, includeSelected), source: e.source,
-      matchPrecision: isApproxMatch(e) ? "county-approximate" : "footprint",
-      startsAt: e.time || null, endsAt: e.expires || null,
+      matchMethod: e.matchMethod || (isApproxMatch(e) ? "county-approximate" : "unknown"),
+      matchPrecision: e.matchMethod || (isApproxMatch(e) ? "county-approximate" : "unknown"),
+      startsAt: e.startedAt || null,
+      observedAt: e.observedAt || null,
+      sourceUpdatedAt: e.updatedAt || null,
+      endsAt: e.expiresAt || e.expires || null,
     };
   }
   function orgSummary(o) {
@@ -2347,10 +2608,14 @@
       orgs.forEach(function (o) { counts[o.type]++; });
       return {
         updatedAt: state.updatedAt,
+        feedsCheckedAt: state.feedsCheckedAt,
+        dataAsOf: state.dataAsOf,
+        feedsComplete: state.feedsComplete,
+        unavailableSources: state.unavailableFeeds.slice(),
         totalOrganizations: orgs.length,
         selectedOrganizations: includeSelected ? orgs.filter(function (o) { return o.selected; }).length : 0,
         privateDataIncluded: includeSelected,
-        mapShowsOnlyPrivateList: !!state.onlySelected,
+        mapShowsOnlyPrivateList: includeSelected ? !!state.onlySelected : false,
         organizationsByType: counts,
         countriesCovered: ["United States", "Canada", "Mexico"],
         activeEventCount: vis.length,
@@ -2414,8 +2679,7 @@
     focusOrganization: function (id, opts) {
       opts = opts || {};
       var o = orgById[id];
-      if (!o) return { ok: false, error: "No organization with that id" };
-      if (o.selected && !opts.includeSelected) return { ok: false, error: "Private uploaded organizations are not available to the assistant without user permission" };
+      if (!o || (o.selected && !opts.includeSelected)) return { ok: false, error: "Organization is unavailable" };
       prepareMapForNavigation();
       map.easeTo({ center: [o.lon, o.lat], zoom: Math.max(map.getZoom(), 9), padding: pointFramePadding() });
       showOrgPopup(o.id);
@@ -2431,6 +2695,12 @@
       return { ok: true, note: "Brief opened in a new tab (or downloaded if the popup was blocked)." };
     },
     resetView: function () { resetView(); showList(); return { ok: true }; },
+    getPrivateListState: function () {
+      return { count: selectedCount(), generation: privateListGeneration };
+    },
+    getPerformanceMetrics: function () {
+      return Object.assign({}, state.performanceMetrics);
+    },
     layerGroups: function () {
       return Object.keys(LAYER_GROUPS).map(function (g) { return { id: g, label: LAYER_GROUPS[g].label }; });
     },
@@ -2558,13 +2828,23 @@
     el("outreach-copy").addEventListener("click", function () {
       var ta = el("outreach-text"), btn = el("outreach-copy");
       function done() { btn.textContent = "Copied ✓"; setTimeout(function () { btn.textContent = "Copy to clipboard"; }, 1600); }
-      function legacy() { ta.select(); try { document.execCommand("copy"); } catch (e) {} done(); }
+      function failed() {
+        ta.focus(); ta.select();
+        btn.textContent = "Copy manually";
+        setTimeout(function () { btn.textContent = "Copy to clipboard"; }, 2400);
+      }
+      function legacy() {
+        ta.focus(); ta.select();
+        var copied = false;
+        try { copied = document.execCommand("copy") === true; } catch (e) {}
+        if (copied) done(); else failed();
+      }
       if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(ta.value).then(done, legacy);
       else legacy();
     });
 
     // Restore the impact-trend sparkline from any history recorded in earlier sessions.
-    try { renderTrend(JSON.parse(localStorage.getItem(HIST_LS) || "[]")); } catch (e) {}
+    renderTrend(loadHistory(), false);
 
     // Auto-refresh feeds every 5 minutes.
     setInterval(loadFeeds, 5 * 60 * 1000);
